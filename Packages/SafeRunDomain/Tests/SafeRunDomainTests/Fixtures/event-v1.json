@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "packet_id": "22222222-2222-4222-8222-222222222222",
+  "session_id": "local-session-001",
+  "seq": 43,
+  "watch_timestamp": "2026-09-07T14:12:04.123Z",
+  "kind": "event",
+  "payload": {
+    "event_id": "33333333-3333-4333-8333-333333333333",
+    "event_type": "manual_sos",
+    "severity": "critical",
+    "rule_id": null,
+    "incident_id": "44444444-4444-4444-8444-444444444444",
+    "context": {
+      "heart_rate_bpm": 152,
+      "last_location": {
+        "lat": 10.7765,
+        "lon": 106.7009
+      },
+      "elapsed_s": 813
+    }
+  }
+}
+

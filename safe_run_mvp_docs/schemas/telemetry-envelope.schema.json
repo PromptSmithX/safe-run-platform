@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://safe-run.local/schemas/telemetry-envelope.schema.json",
+  "title": "TelemetryEnvelope",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "packet_id",
+    "session_id",
+    "seq",
+    "watch_timestamp",
+    "kind",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "packet_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "watch_timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "kind": {
+      "const": "telemetry"
+    },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "heart_rate_bpm": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "heart_rate_sample_age_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "elapsed_s": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "distance_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "speed_mps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "location": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "lat": {
+              "type": "number",
+              "minimum": -90,
+              "maximum": 90
+            },
+            "lon": {
+              "type": "number",
+              "minimum": -180,
+              "maximum": 180
+            },
+            "horizontal_accuracy_m": {
+              "type": "number",
+              "minimum": 0
+            },
+            "age_ms": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "lat",
+            "lon",
+            "horizontal_accuracy_m",
+            "age_ms"
+          ],
+          "additionalProperties": false
+        },
+        "motion_state": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "running",
+            "walking",
+            "stationary",
+            "unknown",
+            null
+          ]
+        },
+        "watch_battery": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "elapsed_s"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,102 @@
+openapi: 3.1.0
+info:
+  title: Safe Run MVP API
+  version: 0.1.0
+servers:
+  - url: https://api.example.com
+paths:
+  /v1/run-sessions:
+    post:
+      summary: Start an idempotent run session
+      security: [{ FirebaseAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [client_session_id]
+              properties:
+                client_session_id: { type: string, format: uuid }
+                watch_model: { type: string }
+                app_version: { type: string }
+                config_version: { type: integer }
+      responses:
+        '201':
+          description: Session created or existing active idempotent session returned
+  /v1/run-sessions/{session_id}/telemetry:
+    post:
+      summary: Ingest telemetry packet
+      security: [{ IngestToken: [] }]
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './schemas/telemetry-envelope.schema.json'
+      responses:
+        '200': { description: Accepted or duplicate safely acknowledged }
+  /v1/run-sessions/{session_id}/events:
+    post:
+      summary: Ingest lifecycle or safety event
+      security: [{ IngestToken: [] }]
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './schemas/event-envelope.schema.json'
+      responses:
+        '200': { description: Accepted; critical events may create/update an incident }
+  /v1/run-sessions/{session_id}/end:
+    post:
+      summary: End session and revoke ingest token
+      security: [{ IngestToken: [] }]
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Ended }
+  /v1/devices:
+    post:
+      summary: Register caregiver/runner iOS push token
+      security: [{ FirebaseAuth: [] }]
+      responses:
+        '200': { description: Registered }
+  /v1/incidents/{incident_id}/acknowledge:
+    post:
+      summary: Caregiver acknowledges incident
+      security: [{ FirebaseAuth: [] }]
+      parameters:
+        - in: path
+          name: incident_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Acknowledged }
+components:
+  securitySchemes:
+    FirebaseAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: FirebaseIDToken
+    IngestToken:
+      type: http
+      scheme: bearer
+      bearerFormat: OpaqueRunSessionToken

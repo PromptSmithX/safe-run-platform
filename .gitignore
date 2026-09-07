@@ -1,0 +1,19 @@
+# XcodeGen output
+SafeRun.xcodeproj/
+
+# Xcode user and build artifacts
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.moved-aside
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Packages/**/.build/
+
+# macOS
+.DS_Store
+

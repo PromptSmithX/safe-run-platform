@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://safe-run.local/schemas/incident.schema.json",
+  "title": "Incident",
+  "type": "object",
+  "required": [
+    "incident_id",
+    "session_id",
+    "type",
+    "severity",
+    "status",
+    "created_at"
+  ],
+  "properties": {
+    "incident_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "session_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "type": {
+      "type": "string"
+    },
+    "severity": {
+      "type": "string",
+      "enum": [
+        "warning",
+        "critical"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "check_in",
+        "alerted",
+        "acknowledged",
+        "resolved",
+        "cancelled"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "context": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}
