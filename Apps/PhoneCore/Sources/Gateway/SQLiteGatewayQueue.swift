@@ -14,6 +14,27 @@ public struct GatewayQueueSnapshot: Equatable, Sendable {
     public var totalCount: Int { counts.values.reduce(0, +) }
 }
 
+public struct UploadQueueClaim: Equatable, Sendable {
+    public let localID: Int64
+    public let packet: TransportPacket
+    public let attemptCount: Int
+}
+
+public struct SessionBinding: Equatable, Sendable {
+    public let localSessionID: String
+    public let serverSessionID: String
+    public let credentialAccount: String
+    public let expiresAt: Date
+    public let state: String
+    public let lastSequence: Int
+}
+
+public struct PendingUploadSummary: Equatable, Sendable {
+    public let retryable: Int
+    public let terminal: Int
+    public let nextAttemptAt: Date?
+}
+
 public enum GatewayQueueError: Error, LocalizedError {
     case openFailed(String)
     case sqlite(String)
@@ -69,6 +90,20 @@ public actor SQLiteGatewayQueue {
             """)
         try Self.execute(handle, "CREATE INDEX IF NOT EXISTS idx_packets_pending ON packets(server_acked_at, priority, local_id);")
         try Self.execute(handle, "CREATE INDEX IF NOT EXISTS idx_packets_session_sequence ON packets(session_id, sequence);")
+        try Self.addColumnIfNeeded(handle, table: "packets", name: "leased_until", definition: "REAL")
+        try Self.addColumnIfNeeded(handle, table: "packets", name: "terminal_error_code", definition: "TEXT")
+        try Self.execute(handle, """
+            CREATE TABLE IF NOT EXISTS session_bindings (
+                local_session_id TEXT PRIMARY KEY,
+                server_session_id TEXT NOT NULL,
+                credential_account TEXT NOT NULL,
+                expires_at REAL NOT NULL,
+                state TEXT NOT NULL DEFAULT 'active',
+                last_sequence INTEGER NOT NULL DEFAULT 0,
+                finalized_at REAL
+            );
+            """)
+        try Self.execute(handle, "PRAGMA user_version=2;")
         try? FileManager.default.setAttributes(
             [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
             ofItemAtPath: databaseURL.path
@@ -142,6 +177,180 @@ public actor SQLiteGatewayQueue {
         return try TransportPacket.decodeEnvelope(Data(bytes: bytes, count: length))
     }
 
+    public func claimNext(now: Date = Date(), leaseSeconds: TimeInterval = 30) throws -> UploadQueueClaim? {
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            let sql = """
+                SELECT local_id, payload_blob, attempt_count FROM packets
+                WHERE server_acked_at IS NULL AND terminal_error_code IS NULL
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                  AND (leased_until IS NULL OR leased_until <= ?)
+                ORDER BY priority ASC, local_id ASC LIMIT 1;
+                """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+                  let statement else { throw sqliteError() }
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_double(statement, 1, now.timeIntervalSince1970)
+            sqlite3_bind_double(statement, 2, now.timeIntervalSince1970)
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { try execute("COMMIT;"); return nil }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            let localID = sqlite3_column_int64(statement, 0)
+            let length = Int(sqlite3_column_bytes(statement, 1))
+            guard length > 0, let bytes = sqlite3_column_blob(statement, 1) else {
+                throw GatewayQueueError.sqlite("Stored packet payload is empty.")
+            }
+            let packet = try TransportPacket.decodeEnvelope(Data(bytes: bytes, count: length))
+            let attempt = Int(sqlite3_column_int(statement, 2))
+            try execute("UPDATE packets SET leased_until = \(now.addingTimeInterval(max(1, leaseSeconds)).timeIntervalSince1970) WHERE local_id = \(localID);")
+            try execute("COMMIT;")
+            return UploadQueueClaim(localID: localID, packet: packet, attemptCount: attempt)
+        } catch { try? execute("ROLLBACK;"); throw error }
+    }
+
+    public func markUploaded(localID: Int64, at date: Date = Date()) throws {
+        try execute("UPDATE packets SET server_acked_at = \(date.timeIntervalSince1970), leased_until = NULL, next_attempt_at = NULL WHERE local_id = \(localID);")
+    }
+
+    public func completeUpload(
+        localID: Int64,
+        localSessionID: String,
+        sequence: Int,
+        marksSessionEnding: Bool,
+        at date: Date = Date()
+    ) throws {
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            try markUploaded(localID: localID, at: date)
+            try updateBindingSequence(localSessionID: localSessionID, sequence: sequence)
+            if marksSessionEnding { try markBindingEnding(localSessionID: localSessionID) }
+            try execute("COMMIT;")
+        } catch { try? execute("ROLLBACK;"); throw error }
+    }
+
+    public func scheduleRetry(localID: Int64, attemptCount: Int, nextAttemptAt: Date) throws {
+        try execute("UPDATE packets SET attempt_count = \(attemptCount), next_attempt_at = \(nextAttemptAt.timeIntervalSince1970), leased_until = NULL WHERE local_id = \(localID);")
+    }
+
+    public func markTerminal(localID: Int64, code: String) throws {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "UPDATE packets SET terminal_error_code = ?, leased_until = NULL WHERE local_id = ?;", -1, &statement, nil) == SQLITE_OK,
+              let statement else { throw sqliteError() }
+        defer { sqlite3_finalize(statement) }
+        bind(code, to: 1, in: statement)
+        sqlite3_bind_int64(statement, 2, localID)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw sqliteError() }
+    }
+
+    public func saveBinding(_ binding: SessionBinding) throws {
+        let sql = """
+            INSERT INTO session_bindings(local_session_id, server_session_id, credential_account, expires_at, state, last_sequence)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(local_session_id) DO UPDATE SET server_session_id=excluded.server_session_id,
+              credential_account=excluded.credential_account, expires_at=excluded.expires_at,
+              state=session_bindings.state, last_sequence=MAX(session_bindings.last_sequence, excluded.last_sequence);
+            """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw sqliteError() }
+        defer { sqlite3_finalize(statement) }
+        bind(binding.localSessionID, to: 1, in: statement)
+        bind(binding.serverSessionID, to: 2, in: statement)
+        bind(binding.credentialAccount, to: 3, in: statement)
+        sqlite3_bind_double(statement, 4, binding.expiresAt.timeIntervalSince1970)
+        bind(binding.state, to: 5, in: statement)
+        sqlite3_bind_int64(statement, 6, sqlite3_int64(binding.lastSequence))
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw sqliteError() }
+    }
+
+    public func binding(for localSessionID: String) throws -> SessionBinding? {
+        let sql = "SELECT server_session_id, credential_account, expires_at, state, last_sequence FROM session_bindings WHERE local_session_id = ?;"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw sqliteError() }
+        defer { sqlite3_finalize(statement) }
+        bind(localSessionID, to: 1, in: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return SessionBinding(
+            localSessionID: localSessionID,
+            serverSessionID: String(cString: sqlite3_column_text(statement, 0)),
+            credentialAccount: String(cString: sqlite3_column_text(statement, 1)),
+            expiresAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2)),
+            state: String(cString: sqlite3_column_text(statement, 3)),
+            lastSequence: Int(sqlite3_column_int64(statement, 4))
+        )
+    }
+
+    public func updateBindingSequence(localSessionID: String, sequence: Int) throws {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "UPDATE session_bindings SET last_sequence=MAX(last_sequence, ?) WHERE local_session_id=?;", -1, &statement, nil) == SQLITE_OK, let statement else { throw sqliteError() }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, sqlite3_int64(sequence))
+        bind(localSessionID, to: 2, in: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw sqliteError() }
+    }
+
+    public func markBindingEnding(localSessionID: String) throws {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "UPDATE session_bindings SET state='ending' WHERE local_session_id=?;", -1, &statement, nil) == SQLITE_OK, let statement else { throw sqliteError() }
+        defer { sqlite3_finalize(statement) }
+        bind(localSessionID, to: 1, in: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw sqliteError() }
+    }
+
+    public func markBindingEnded(localSessionID: String, at date: Date = Date()) throws {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "UPDATE session_bindings SET state='ended', finalized_at=? WHERE local_session_id=?;", -1, &statement, nil) == SQLITE_OK, let statement else { throw sqliteError() }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, date.timeIntervalSince1970)
+        bind(localSessionID, to: 2, in: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw sqliteError() }
+    }
+
+    public func bindingsAwaitingFinalization() throws -> [SessionBinding] {
+        let sql = "SELECT local_session_id, server_session_id, credential_account, expires_at, state, last_sequence FROM session_bindings WHERE state='ending';"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw sqliteError() }
+        defer { sqlite3_finalize(statement) }
+        var values: [SessionBinding] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            values.append(SessionBinding(
+                localSessionID: String(cString: sqlite3_column_text(statement, 0)),
+                serverSessionID: String(cString: sqlite3_column_text(statement, 1)),
+                credentialAccount: String(cString: sqlite3_column_text(statement, 2)),
+                expiresAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
+                state: String(cString: sqlite3_column_text(statement, 4)),
+                lastSequence: Int(sqlite3_column_int64(statement, 5))
+            ))
+        }
+        return values
+    }
+
+    public func canFinalize(localSessionID: String) throws -> Bool {
+        var statement: OpaquePointer?
+        let sql = """
+            SELECT
+              SUM(CASE WHEN terminal_error_code IS NULL THEN 1 ELSE 0 END),
+              SUM(CASE WHEN terminal_error_code IS NOT NULL AND priority = 0 THEN 1 ELSE 0 END)
+            FROM packets WHERE session_id = ? AND server_acked_at IS NULL;
+            """
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw sqliteError() }
+        defer { sqlite3_finalize(statement) }
+        bind(localSessionID, to: 1, in: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw sqliteError() }
+        return sqlite3_column_int(statement, 0) == 0 && sqlite3_column_int(statement, 1) == 0
+    }
+
+    public func pendingSummary(now: Date = Date()) throws -> PendingUploadSummary {
+        let retryable = try scalarInt("SELECT COUNT(*) FROM packets WHERE server_acked_at IS NULL AND terminal_error_code IS NULL;")
+        let terminal = try scalarInt("SELECT COUNT(*) FROM packets WHERE server_acked_at IS NULL AND terminal_error_code IS NOT NULL;")
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "SELECT MIN(next_attempt_at) FROM packets WHERE server_acked_at IS NULL AND terminal_error_code IS NULL;", -1, &statement, nil) == SQLITE_OK, let statement else { throw sqliteError() }
+        defer { sqlite3_finalize(statement) }
+        let hasRow = sqlite3_step(statement) == SQLITE_ROW
+        let next = hasRow && sqlite3_column_type(statement, 0) != SQLITE_NULL ? Date(timeIntervalSince1970: sqlite3_column_double(statement, 0)) : nil
+        return PendingUploadSummary(retryable: retryable, terminal: terminal, nextAttemptAt: next)
+    }
+
     private func trimTelemetry() throws {
         let count = try scalarInt(
             "SELECT COUNT(*) FROM packets WHERE server_acked_at IS NULL AND priority = \(PacketPriority.telemetry.rawValue);"
@@ -175,6 +384,18 @@ public actor SQLiteGatewayQueue {
             sqlite3_free(errorMessage)
             throw GatewayQueueError.sqlite(message)
         }
+    }
+
+    private static func addColumnIfNeeded(_ database: OpaquePointer, table: String, name: String, definition: String) throws {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "PRAGMA table_info(\(table));", -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw GatewayQueueError.sqlite("Unable to inspect SQLite schema.")
+        }
+        defer { sqlite3_finalize(statement) }
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let value = sqlite3_column_text(statement, 1), String(cString: value) == name { return }
+        }
+        try execute(database, "ALTER TABLE \(table) ADD COLUMN \(name) \(definition);")
     }
 
     private func bind(_ value: String, to index: Int32, in statement: OpaquePointer) {

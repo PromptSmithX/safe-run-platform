@@ -1,0 +1,252 @@
+import Ajv2020 from "ajv/dist/2020";
+import addFormats from "ajv-formats";
+import express, { type NextFunction, type Request, type Response } from "express";
+import { randomUUID } from "node:crypto";
+import { getAuth } from "firebase-admin/auth";
+import { FieldValue, Timestamp, getFirestore } from "firebase-admin/firestore";
+import telemetrySchema from "./generated-schemas/telemetry-envelope.schema.json";
+import eventSchema from "./generated-schemas/event-envelope.schema.json";
+import { APIError, sendError } from "./errors";
+import { issueIngestToken, tokenHashesMatch } from "./token";
+
+const db = getFirestore();
+const ajv = new Ajv2020({ allErrors: true, strict: false });
+addFormats(ajv);
+const validateTelemetry = ajv.compile(telemetrySchema);
+const validateEvent = ajv.compile(eventSchema);
+const tokenTTLMillis = 4 * 60 * 60 * 1000;
+
+type AuthedRequest = Request & { runnerUID?: string; requestID?: string };
+type Envelope = {
+  schema_version: number; packet_id: string; session_id: string; seq: number;
+  watch_timestamp: string; kind: "telemetry" | "event"; payload: Record<string, unknown>;
+};
+
+export const app = express();
+app.disable("x-powered-by");
+app.use(express.json({ limit: "256kb" }));
+app.use((request: AuthedRequest, response, next) => {
+  request.requestID = randomUUID();
+  response.setHeader("x-request-id", request.requestID);
+  next();
+});
+
+function bearer(request: Request): string {
+  const value = request.header("authorization") ?? "";
+  if (!value.startsWith("Bearer ") || value.length <= 7) {
+    throw new APIError(401, "UNAUTHORIZED", "Bearer token required");
+  }
+  return value.slice(7);
+}
+
+async function requireUser(request: AuthedRequest, _response: Response, next: NextFunction) {
+  try {
+    request.runnerUID = (await getAuth().verifyIdToken(bearer(request))).uid;
+    next();
+  } catch (error) {
+    next(error instanceof APIError ? error : new APIError(401, "UNAUTHORIZED", "Invalid Firebase ID token"));
+  }
+}
+
+function requireUUID(value: unknown, field: string): string {
+  if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw new APIError(400, "INVALID_SCHEMA", `${field} must be a UUID`);
+  }
+  return value;
+}
+
+app.post("/v1/run-sessions", requireUser, async (request: AuthedRequest, response, next) => {
+  try {
+    const uid = request.runnerUID!;
+    const clientSessionID = requireUUID(request.body?.client_session_id, "client_session_id");
+    const mappingID = Buffer.from(`${uid}:${clientSessionID}`).toString("base64url");
+    const mappingRef = db.collection("clientRunSessions").doc(mappingID);
+    const token = issueIngestToken();
+    const expiresAt = Timestamp.fromMillis(Date.now() + tokenTTLMillis);
+    const sessionID = await db.runTransaction(async transaction => {
+      const mapping = await transaction.get(mappingRef);
+      const existingID = mapping.exists ? mapping.get("session_id") as string : undefined;
+      const chosenID = existingID ?? randomUUID();
+      const sessionRef = db.collection("runSessions").doc(chosenID);
+      if (!existingID) {
+        transaction.set(db.collection("users").doc(uid), {
+          display_name: "Safe Run runner", default_family_id: uid, created_at: FieldValue.serverTimestamp(),
+        }, { merge: true });
+        transaction.set(db.collection("families").doc(uid), {
+          name: "Personal Safe Run family", created_at: FieldValue.serverTimestamp(),
+        }, { merge: true });
+        transaction.set(db.collection("families").doc(uid).collection("members").doc(uid), {
+          role: "runner", status: "active", created_at: FieldValue.serverTimestamp(),
+        }, { merge: true });
+        transaction.create(sessionRef, {
+          runner_uid: uid, family_id: uid, client_session_id: clientSessionID, status: "active",
+          started_at: FieldValue.serverTimestamp(), last_seen_at: FieldValue.serverTimestamp(), last_seq: 0,
+          active_incident_id: null,
+        });
+        transaction.create(mappingRef, { runner_uid: uid, client_session_id: clientSessionID, session_id: chosenID });
+      } else {
+        const session = await transaction.get(sessionRef);
+        if (!session.exists || session.get("runner_uid") !== uid || session.get("status") !== "active") {
+          throw new APIError(409, "SESSION_ENDED", "Session is no longer active");
+        }
+      }
+      transaction.update(sessionRef, { ingest_token_hash: token.hash, ingest_token_expires_at: expiresAt });
+      return chosenID;
+    });
+    const now = new Date();
+    response.status(201).json({
+      session_id: sessionID, ingest_token: token.raw,
+      expires_at: expiresAt.toDate().toISOString(), server_time: now.toISOString(),
+    });
+  } catch (error) { next(error); }
+});
+
+async function authenticatedSession(request: Request): Promise<{ ref: FirebaseFirestore.DocumentReference; data: FirebaseFirestore.DocumentData }> {
+  const sessionID = requireUUID(request.params.session_id, "session_id");
+  const ref = db.collection("runSessions").doc(sessionID);
+  const snapshot = await ref.get();
+  if (!snapshot.exists) throw new APIError(404, "SESSION_NOT_FOUND", "Session not found");
+  const data = snapshot.data()!;
+  const ended = data.status === "ended";
+  const expiry = (ended ? data.revoked_ingest_token_expires_at : data.ingest_token_expires_at) as Timestamp | undefined;
+  if (!expiry || expiry.toMillis() <= Date.now()) throw new APIError(401, "SESSION_TOKEN_EXPIRED", "Ingest token expired");
+  const expectedHash = ended ? data.revoked_ingest_token_hash : data.ingest_token_hash;
+  if (typeof expectedHash !== "string" || !tokenHashesMatch(expectedHash, bearer(request))) {
+    throw new APIError(403, "FORBIDDEN", "Token is not valid for this session");
+  }
+  return { ref, data };
+}
+
+async function ingest(request: Request, response: Response, kind: "telemetry" | "event") {
+  const validate = kind === "telemetry" ? validateTelemetry : validateEvent;
+  if (!validate(request.body)) throw new APIError(400, "INVALID_SCHEMA", "Envelope does not match schema");
+  const envelope = request.body as Envelope;
+  const { ref: sessionRef } = await authenticatedSession(request);
+  if (envelope.session_id !== sessionRef.id || envelope.kind !== kind) {
+    throw new APIError(400, "INVALID_SCHEMA", "Envelope session or kind does not match endpoint");
+  }
+  if (kind === "telemetry" && request.header("idempotency-key") !== envelope.packet_id) {
+    throw new APIError(400, "INVALID_SCHEMA", "Idempotency-Key must match packet_id");
+  }
+
+  const packetRef = sessionRef.collection("packets").doc(envelope.packet_id);
+  const result = await db.runTransaction(async transaction => {
+    const [session, packet] = await Promise.all([transaction.get(sessionRef), transaction.get(packetRef)]);
+    if (packet.exists) return { duplicate: true, lastSeq: session.get("last_seq") as number };
+    if (session.get("status") !== "active") throw new APIError(409, "SESSION_ENDED", "Session has ended");
+
+    const minute = Math.floor(Date.now() / 60_000);
+    const rateRef = sessionRef.collection("rateLimits").doc(`${kind}-${minute}`);
+    const rate = await transaction.get(rateRef);
+    const count = rate.exists ? Number(rate.get("count")) : 0;
+    const limit = kind === "telemetry" ? 30 : 60;
+    if (count >= limit) throw new APIError(429, "RATE_LIMITED", "Rate limit exceeded", true);
+    let eventID: string | undefined;
+    let eventRef: FirebaseFirestore.DocumentReference | undefined;
+    let eventExists = false;
+    let incidentID: string | undefined;
+    let incidentRef: FirebaseFirestore.DocumentReference | undefined;
+    let incidentExists = false;
+    if (kind === "event") {
+      eventID = requireUUID(envelope.payload.event_id, "event_id");
+      eventRef = sessionRef.collection("events").doc(eventID);
+      eventExists = (await transaction.get(eventRef)).exists;
+      if (envelope.payload.severity === "critical") {
+        incidentID = requireUUID(envelope.payload.incident_id, "incident_id");
+        incidentRef = db.collection("incidents").doc(incidentID);
+        incidentExists = (await transaction.get(incidentRef)).exists;
+      }
+    }
+
+    transaction.set(rateRef, { count: count + 1, minute, expires_at: Timestamp.fromMillis((minute + 2) * 60_000) });
+    transaction.create(packetRef, { kind, seq: envelope.seq, received_at: FieldValue.serverTimestamp() });
+
+    const previousSequence = Number(session.get("last_seq") ?? 0);
+    const newest = envelope.seq >= previousSequence;
+    const update: Record<string, unknown> = {
+      last_seen_at: FieldValue.serverTimestamp(), last_seq: Math.max(previousSequence, envelope.seq),
+    };
+    if (newest) {
+      update.last_watch_timestamp = envelope.watch_timestamp;
+      if (kind === "telemetry") {
+        const payload = envelope.payload;
+        update.latest_hr = payload.heart_rate_bpm ?? null;
+        const location = payload.location as Record<string, unknown> | undefined;
+        update.latest_lat = location?.lat ?? null;
+        update.latest_lon = location?.lon ?? null;
+        update.latest_speed = payload.speed_mps ?? null;
+      }
+    }
+    transaction.update(sessionRef, update);
+
+    if (kind === "telemetry" && newest) {
+      const bucket = Math.floor(Date.now() / 30_000);
+      transaction.set(sessionRef.collection("samples").doc(String(bucket)), {
+        at: FieldValue.serverTimestamp(), seq: envelope.seq,
+        hr: envelope.payload.heart_rate_bpm ?? null,
+        lat: (envelope.payload.location as Record<string, unknown> | undefined)?.lat ?? null,
+        lon: (envelope.payload.location as Record<string, unknown> | undefined)?.lon ?? null,
+        speed: envelope.payload.speed_mps ?? null,
+      }, { merge: false });
+    } else {
+      if (!eventExists) transaction.create(eventRef!, {
+        type: envelope.payload.event_type, severity: envelope.payload.severity,
+        watch_at: envelope.watch_timestamp, received_at: FieldValue.serverTimestamp(), payload: envelope.payload,
+      });
+      if (envelope.payload.severity === "critical") {
+        if (!incidentExists) {
+          transaction.create(incidentRef!, {
+            session_id: sessionRef.id, family_id: session.get("family_id"), runner_uid: session.get("runner_uid"),
+            type: envelope.payload.event_type, severity: "critical", status: "alerted",
+            created_at: FieldValue.serverTimestamp(), context: envelope.payload.context ?? null,
+          });
+          transaction.set(db.collection("incidentFanoutMarkers").doc(incidentID!), {
+            incident_id: incidentID, status: "pending", created_at: FieldValue.serverTimestamp(),
+          });
+          transaction.update(sessionRef, { active_incident_id: incidentID });
+        }
+      }
+    }
+    return { duplicate: false, lastSeq: Math.max(previousSequence, envelope.seq), incidentID };
+  });
+  response.status(200).json({
+    accepted: true, duplicate: result.duplicate, last_seq: result.lastSeq,
+    server_time: new Date().toISOString(), incident_id: result.incidentID,
+    incident_status: result.incidentID ? "alerted" : undefined,
+  });
+}
+
+app.post("/v1/run-sessions/:session_id/telemetry", (request, response, next) => {
+  ingest(request, response, "telemetry").catch(next);
+});
+app.post("/v1/run-sessions/:session_id/events", (request, response, next) => {
+  ingest(request, response, "event").catch(next);
+});
+
+app.post("/v1/run-sessions/:session_id/end", async (request, response, next) => {
+  try {
+    const { ref, data: authenticatedData } = await authenticatedSession(request);
+    const lastSequence = Number(request.body?.last_seq);
+    if (!Number.isInteger(lastSequence) || lastSequence < 1) throw new APIError(400, "INVALID_SCHEMA", "last_seq must be positive");
+    await db.runTransaction(async transaction => {
+      const session = await transaction.get(ref);
+      if (session.get("status") === "ended") return;
+      transaction.update(ref, {
+        status: "ended", ended_at: FieldValue.serverTimestamp(), last_seq: Math.max(Number(session.get("last_seq") ?? 0), lastSequence),
+        revoked_ingest_token_hash: authenticatedData.ingest_token_hash,
+        revoked_ingest_token_expires_at: Timestamp.fromMillis(Date.now() + 24 * 60 * 60 * 1000),
+        ingest_token_hash: FieldValue.delete(), ingest_token_expires_at: FieldValue.delete(),
+      });
+    });
+    response.status(200).json({ accepted: true, server_time: new Date().toISOString() });
+  } catch (error) { next(error); }
+});
+
+app.use((_request, _response, next) => next(new APIError(404, "NOT_FOUND", "Endpoint not found")));
+app.use((error: unknown, request: AuthedRequest, response: Response, _next: NextFunction) => {
+  const normalized = error instanceof SyntaxError && "status" in error && error.status === 400
+    ? new APIError(400, "INVALID_SCHEMA", "Request body is not valid JSON")
+    : error;
+  console.error("api_request_failed", { request_id: request.requestID, code: normalized instanceof APIError ? normalized.code : "INTERNAL" });
+  sendError(response, normalized, request.requestID);
+});

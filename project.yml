@@ -18,6 +18,9 @@ settings:
 packages:
   SafeRunDomain:
     path: Packages/SafeRunDomain
+  Firebase:
+    url: https://github.com/firebase/firebase-ios-sdk.git
+    from: 12.18.0
 
 targets:
   SafeRunApp:
@@ -33,6 +36,9 @@ targets:
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        SAFERUN_API_BASE_URL: $(SAFERUN_BACKEND_URL)
         NSHealthShareUsageDescription: Safe Run receives the lifecycle of workouts started on the paired Apple Watch for recovery and diagnostics.
     entitlements:
       path: Apps/iOS/SafeRunIOS.entitlements
@@ -43,8 +49,13 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.saferun.mvp.ios
         PRODUCT_NAME: SafeRun
         GENERATE_INFOPLIST_FILE: NO
+        SAFERUN_BACKEND_URL: ""
     dependencies:
       - package: SafeRunDomain
+      - package: Firebase
+        product: FirebaseCore
+      - package: Firebase
+        product: FirebaseAuth
       - target: SafeRunPhoneCore
         embed: true
       - target: SafeRunWatchApp
@@ -114,6 +125,7 @@ targets:
       - sdk: WatchConnectivity.framework
       - sdk: HealthKit.framework
       - sdk: libsqlite3.tbd
+      - sdk: Security.framework
 
   SafeRunPhoneCoreTests:
     type: bundle.unit-test
