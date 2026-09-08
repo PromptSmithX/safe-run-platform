@@ -10,6 +10,7 @@ public protocol SafeRunAPIClientProtocol: Sendable {
     func createSession(_ request: CreateRunSessionRequest, userToken: String) async throws -> CreateRunSessionResponse
     func ingest(_ packet: TransportPacket, serverSessionID: String, ingestToken: String) async throws -> IngestResponse
     func endSession(serverSessionID: String, ingestToken: String, request: EndRunSessionRequest) async throws
+    func reconcileSessions(_ request: SessionReconciliationRequest, userToken: String) async throws -> SessionReconciliationResponse
 }
 
 public protocol CaregiverAPIClientProtocol: Sendable {
@@ -69,6 +70,10 @@ public final class SafeRunAPIClient: SafeRunAPIClientProtocol, @unchecked Sendab
         let _: IngestResponse = try await send(
             path: "v1/run-sessions/\(serverSessionID)/end", method: "POST", token: ingestToken, body: request
         )
+    }
+
+    public func reconcileSessions(_ request: SessionReconciliationRequest, userToken: String) async throws -> SessionReconciliationResponse {
+        try await send(path: "v1/run-sessions/reconcile", method: "POST", token: userToken, body: request)
     }
 
     public func registerDevice(_ request: DeviceRegistrationRequest, userToken: String) async throws -> DeviceRegistrationResponse {

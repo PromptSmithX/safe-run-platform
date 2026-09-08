@@ -118,6 +118,20 @@ public final class RunSessionViewModel: ObservableObject {
         await packetCoordinator?.runDidEnd()
     }
 
+    public func recoverActiveRun() async {
+        guard state == .idle || state == .failed else { return }
+        state = .recovering
+        do {
+            guard let snapshot = try await workoutProvider.recoverWorkout() else {
+                state = .idle
+                return
+            }
+            startedAt = snapshot.startedAt
+            state = snapshot.state
+            if locationAvailable { locationProvider.startUpdatingLocation() }
+        } catch { fail(with: error) }
+    }
+
     public func reset() {
         guard state == .ended || state == .failed else {
             return

@@ -34,6 +34,16 @@ public final class CheckInCoordinator: ObservableObject {
     public func supersedeWithManualSOS() { guard case .active = state else { return }; state = .resolved; onResolved?(.superseded) }
     public func resetForRun() { state = .idle }
 
+    public func restore(_ snapshot: PersistentCheckInSnapshot, at date: Date) async {
+        guard snapshot.terminalOutcome == nil, state == .idle || state == .resolved || state == .escalated else { return }
+        let evidence = snapshot.context?.ruleEvaluation ?? RuleEvaluationSnapshot(
+            thresholdBPM: 0, windowSeconds: 0, sampleCount: 0, minimumBPM: 0, maximumBPM: 0, averageBPM: 0
+        )
+        let context = CheckInContext(incidentID: snapshot.incidentID, reason: .sustainedHighHeartRate, startedAt: snapshot.deadline.addingTimeInterval(-20), deadline: snapshot.deadline, evidence: evidence)
+        state = .active(context)
+        if date >= snapshot.deadline { await resolve(.timeout) }
+    }
+
     private func resolve(_ resolution: CheckInResolution) async {
         guard case .active(let context) = state else { return }
         state = .resolving
