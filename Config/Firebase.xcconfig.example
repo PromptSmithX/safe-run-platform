@@ -1,0 +1,3 @@
+// Copy values into a local, ignored xcconfig or pass SAFERUN_BACKEND_URL to xcodebuild.
+// Add Apps/iOS/Sources/GoogleService-Info.plist from the matching Firebase project.
+SAFERUN_BACKEND_URL = https:/$()/YOUR_REGION-YOUR_PROJECT.cloudfunctions.net/api/

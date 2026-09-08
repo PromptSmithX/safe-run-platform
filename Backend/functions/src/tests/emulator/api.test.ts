@@ -1,0 +1,114 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import test from "node:test";
+import { assertFails, initializeTestEnvironment } from "@firebase/rules-unit-testing";
+import { doc, getDoc, setDoc } from "firebase/firestore";
+import { getApps, initializeApp } from "firebase-admin/app";
+import { getFirestore } from "firebase-admin/firestore";
+
+const projectID = "demo-safe-run";
+const apiBase = `http://127.0.0.1:5001/${projectID}/asia-southeast1/api`;
+
+async function anonymousUser(): Promise<{ idToken: string; localId: string }> {
+  const response = await fetch("http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:signUp?key=demo", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ returnSecureToken: true }),
+  });
+  assert.equal(response.status, 200);
+  return await response.json() as { idToken: string; localId: string };
+}
+
+test("session and telemetry are authenticated and idempotent", async () => {
+  await fetch(`http://127.0.0.1:8080/emulator/v1/projects/${projectID}/databases/(default)/documents`, { method: "DELETE" });
+  const unauthorized = await fetch(`${apiBase}/v1/run-sessions`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ client_session_id: crypto.randomUUID() }),
+  });
+  assert.equal(unauthorized.status, 401);
+  const user = await anonymousUser();
+  const clientSessionID = crypto.randomUUID();
+  const create = () => fetch(`${apiBase}/v1/run-sessions`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${user.idToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ client_session_id: clientSessionID, app_version: "test" }),
+  });
+  const first = await create();
+  assert.equal(first.status, 201);
+  const firstSession = await first.json() as { session_id: string; ingest_token: string };
+  const second = await create();
+  assert.equal(second.status, 201);
+  const rotated = await second.json() as { session_id: string; ingest_token: string };
+  assert.equal(rotated.session_id, firstSession.session_id);
+  assert.notEqual(rotated.ingest_token, firstSession.ingest_token);
+
+  const packetID = crypto.randomUUID();
+  const envelope = {
+    schema_version: 1, packet_id: packetID, session_id: rotated.session_id, seq: 1,
+    watch_timestamp: new Date().toISOString(), kind: "telemetry", payload: { elapsed_s: 1 },
+  };
+  const upload = () => fetch(`${apiBase}/v1/run-sessions/${rotated.session_id}/telemetry`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${rotated.ingest_token}`, "idempotency-key": envelope.packet_id, "content-type": "application/json" },
+    body: JSON.stringify(envelope),
+  });
+  const oldTokenResponse = await fetch(`${apiBase}/v1/run-sessions/${rotated.session_id}/telemetry`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${firstSession.ingest_token}`, "idempotency-key": packetID, "content-type": "application/json" },
+    body: JSON.stringify(envelope),
+  });
+  assert.equal(oldTokenResponse.status, 403);
+  const accepted = await upload();
+  const duplicate = await upload();
+  assert.equal(accepted.status, 200);
+  assert.equal((await duplicate.json() as { duplicate: boolean }).duplicate, true);
+
+  envelope.packet_id = crypto.randomUUID();
+  envelope.seq = 4;
+  assert.equal((await upload()).status, 200);
+  envelope.packet_id = crypto.randomUUID();
+  envelope.seq = 3;
+  assert.equal((await upload()).status, 200);
+  if (getApps().length === 0) initializeApp({ projectId: projectID });
+  const adminDB = getFirestore();
+  assert.equal((await adminDB.collection("runSessions").doc(rotated.session_id).get()).get("last_seq"), 4);
+
+  const eventID = crypto.randomUUID();
+  const incidentID = crypto.randomUUID();
+  const eventPacketID = crypto.randomUUID();
+  const event = {
+    schema_version: 1, packet_id: eventPacketID, session_id: rotated.session_id, seq: 2,
+    watch_timestamp: new Date().toISOString(), kind: "event",
+    payload: { event_id: eventID, event_type: "manual_sos", severity: "critical", incident_id: incidentID },
+  };
+  const eventUpload = () => fetch(`${apiBase}/v1/run-sessions/${rotated.session_id}/events`, {
+    method: "POST", headers: { authorization: `Bearer ${rotated.ingest_token}`, "content-type": "application/json" },
+    body: JSON.stringify(event),
+  });
+  assert.equal((await eventUpload()).status, 200);
+  assert.equal((await eventUpload()).status, 200);
+  assert.equal((await adminDB.collection("incidents").where("session_id", "==", rotated.session_id).get()).size, 1);
+  assert.equal((await adminDB.collection("incidentFanoutMarkers").get()).size, 1);
+
+  const ended = await fetch(`${apiBase}/v1/run-sessions/${rotated.session_id}/end`, {
+    method: "POST", headers: { authorization: `Bearer ${rotated.ingest_token}`, "content-type": "application/json" },
+    body: JSON.stringify({ reason: "user_stopped", last_seq: 2 }),
+  });
+  assert.equal(ended.status, 200);
+  envelope.packet_id = crypto.randomUUID();
+  envelope.seq = 3;
+  const afterEnd = await fetch(`${apiBase}/v1/run-sessions/${rotated.session_id}/telemetry`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${rotated.ingest_token}`, "idempotency-key": envelope.packet_id, "content-type": "application/json" },
+    body: JSON.stringify(envelope),
+  });
+  assert.equal(afterEnd.status, 409);
+
+  const rules = await initializeTestEnvironment({
+    projectId: projectID,
+    firestore: { rules: readFileSync(resolve(process.cwd(), "../../firestore.rules"), "utf8") },
+  });
+  const client = rules.authenticatedContext(user.localId).firestore();
+  assert.equal((await getDoc(doc(client, "runSessions", rotated.session_id))).exists(), true);
+  await assertFails(setDoc(doc(client, "runSessions", rotated.session_id), { status: "forged" }));
+  await rules.cleanup();
+});

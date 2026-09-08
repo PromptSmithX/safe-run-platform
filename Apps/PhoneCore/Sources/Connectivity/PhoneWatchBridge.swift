@@ -22,6 +22,7 @@ public final class PhoneWatchBridge: NSObject, ObservableObject {
 
     private let session: WCSession
     private let queue: SQLiteGatewayQueue?
+    public var onPacketAccepted: ((TransportPacket) -> Void)?
 
     public init(queue: SQLiteGatewayQueue?, session: WCSession = .default) {
         self.queue = queue
@@ -66,6 +67,7 @@ public final class PhoneWatchBridge: NSObject, ObservableObject {
             await refreshQueue()
             diagnostics.lastPacketID = packet.packetID
             diagnostics.lastError = nil
+            onPacketAccepted?(packet)
             return TransportAcknowledgement(
                 packetID: packet.packetID,
                 status: result == .inserted ? .queued : .duplicate

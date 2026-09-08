@@ -25,10 +25,10 @@ Before making any implementation change:
 
 | Field | Value |
 | --- | --- |
-| Repository maturity | M0 scaffold, Milestone A Watch prototype, and Milestone B reliable Watch-to-iPhone transport source exist. Apple builds/tests and physical-device validation are pending. |
-| Current milestone | `B — Watch-to-iPhone transport (at risk; M0/A verification deferred)` |
+| Repository maturity | M0 through Milestone C source exists, including the Watch prototype, durable Watch–iPhone transport, Firebase ingestion backend, and iPhone uploader. Emulator, Apple builds, and physical-device validation are pending. |
+| Current milestone | `C — Backend ingestion and iPhone uploader (at risk; M0–B verification deferred)` |
 | Current status | `blocked` |
-| Exact next action | On macOS with XcodeGen/Xcode installed, run `bash Scripts/verify-b.sh`; resolve all generation/build/test failures, then execute the M0/A/B physical-device test matrices before changing any milestone to complete. |
+| Exact next action | On macOS with Node 22, Java, XcodeGen, and Xcode installed, run `bash Scripts/verify-c.sh`; resolve every failure before beginning the staged 60-minute device run. |
 | Known implementation prerequisite | Build and device validation require macOS with a current Xcode/watchOS SDK plus physical Apple Watch and iPhone. |
 | Known blockers | The current Windows host has no Swift, XcodeGen, or Xcode, so the generated project and Swift tests cannot be verified here. |
 
@@ -74,7 +74,7 @@ Before making any implementation change:
 
 ### C — Backend ingestion and iPhone uploader
 
-- Status: `not_started`
+- Status: `blocked` (source implemented at risk; emulator, Apple toolchain, and device verification pending)
 - Read first: [API specification](safe_run_mvp_docs/05_API_SPEC.md), [OpenAPI](safe_run_mvp_docs/openapi.yaml), [schemas](safe_run_mvp_docs/schemas/), [Firebase blueprint](safe_run_mvp_docs/08_BACKEND_FIREBASE.md), [security/privacy](safe_run_mvp_docs/10_SECURITY_PRIVACY.md), and Prompts 6–7 in [prompt pack](safe_run_mvp_docs/12_VIBE_CODING_PROMPTS.md).
 - Deliver: Firebase environments; user-authenticated session creation; session-scoped hashed ingest tokens; telemetry/event/end ingestion; idempotency; Firestore live snapshots; iPhone HTTPS upload worker with priority, retry, backoff, and Keychain token storage.
 - Do not implement: caregiver notification fan-out, manual SOS UI, auto-alert rules, or Phase 2 features.
@@ -123,6 +123,9 @@ Phase 2 candidates are not part of any MVP milestone: Fall Detection entitlement
 | 2026-09-08 | Allow Milestone B source work at risk while M0/A remain blocked. | The user explicitly requested the next implementation step while preserving evidence-based completion status. | User direction |
 | 2026-09-08 | Use an atomic JSON retry queue on Watch and system SQLite on iPhone. | This keeps Watch persistence small and dependency-free while giving the gateway transactional dedupe and durable ordering. | Milestone B plan |
 | 2026-09-08 | Restrict workout mirroring to lifecycle and recovery. | WatchConnectivity remains the durable packet and critical-event path; iPhone does not control the workout in B. | Locked architecture |
+| 2026-09-08 | Implement Milestone C at risk with Firebase Emulator first. | The user chose to continue without creating cloud projects or falsely completing unverified Apple milestones. | User direction |
+| 2026-09-08 | Use Cloud Functions 2nd gen on Node 22 and Firebase Anonymous Auth for the runner MVP. | This gives an emulator-testable ingestion path while keeping identity replaceable behind an iPhone token-provider protocol. | Milestone C plan |
+| 2026-09-08 | Rotate the session ingest token on idempotent create-session retry and keep only its SHA-256 hash server-side. | A client can recover from a lost create response without requiring the backend to store or replay the raw secret. | Security design |
 
 ## Handoff log
 
@@ -160,6 +163,17 @@ Add a new entry after each completed or blocked implementation session. Do not c
 - Decisions recorded: JSON Watch queue capped at 120 P3 packets; SQLite gateway capped at 10,000 pending P3 packets; P0-P2 are not pressure-evicted; 15-second ACK timeout; local UUID session IDs; SQLite WAL plus FULL synchronous commits; complete-until-first-user-authentication file protection.
 - Open risks or blockers: New Swift concurrency annotations, WatchConnectivity delegate signatures, HealthKit mirroring APIs, SQLite module linkage, generated entitlements, and simulator destinations require macOS compilation; background delivery and recovery semantics require a paired Watch/iPhone; M0/A verification remains outstanding.
 - Exact next action: Run `bash Scripts/verify-b.sh` on macOS, fix every generation/build/test failure, then execute the M0/A/B physical-device test matrices before marking any blocked milestone complete.
+
+### 2026-09-08: Milestone C ingestion and uploader source prepared
+
+- Milestone/status: `C — blocked (implemented at risk; M0–B also blocked)`
+- Completed: Added an emulator-first TypeScript/Functions 2nd gen backend; Firebase Auth and Firestore configuration/rules; session creation with personal-family bootstrap and token rotation; hashed session-scoped ingest authentication; schema validation, rate limiting, packet/event/incident idempotency, live snapshots, 30-second historical samples, and idempotent end; Firebase Anonymous Auth bootstrap on iPhone; Keychain ingest credentials; SQLite v2 migration, leasing, retry/terminal state and session bindings; priority uploader with envelope remapping, jittered backoff and deferred finalization; background/network triggers, diagnostics, failure injection, tests, and C verification scripts.
+- Changed files: `Backend/`, `firebase.json`, Firestore rules/indexes, `project.yml`, `Packages/SafeRunDomain/`, `Apps/PhoneCore/`, `Apps/iOS/`, `Config/`, `Scripts/verify-c*`, `.gitignore`, and this plan.
+- Verification run: Generated a locked npm dependency graph; parsed `project.yml`; ran backend TypeScript typecheck and production build; ran backend unit tests; ran `git diff --check` and static Swift scope/brace checks; ran a production-dependency npm audit.
+- Verification result: TypeScript typecheck/build passed and the token-security unit test passed. Firebase Emulator integration/rules tests were not run because Java is absent. Swift package/iOS tests, Firebase SDK resolution, XcodeGen generation, simulator builds, and staged device tests were not run because this Windows host lacks the Apple toolchain.
+- Decisions recorded: Emulator project `demo-safe-run`; Node 22; Functions region `asia-southeast1`; Firebase Apple SDK 12.18.0; anonymous runner with deterministic personal family; four-hour active ingest-token TTL plus a 24-hour revoked-hash window used only for idempotent end retries; Keychain after-first-unlock-this-device-only; 30-second sample buckets; terminal 4xx rows retained; no FCM sender in C.
+- Open risks or blockers: The host uses Node 24 rather than the Node 22 deployment runtime and lacks Java/Firebase Emulator/Xcode. npm audit reports seven moderate advisories in transitive `firebase-admin` storage dependencies; the suggested forced remediation is a breaking Firebase Admin downgrade, so it was not applied. All new Swift concurrency, SQLite migration, Firebase Auth, background execution, and URLSession behavior remains uncompiled here.
+- Exact next action: Run `bash Scripts/verify-c.sh` on a macOS machine with Node 22, Java, XcodeGen, and Xcode, and fix every reported failure before the staged device run.
 
 ### Template — YYYY-MM-DD: concise session title
 

@@ -7,6 +7,7 @@ import SwiftUI
 struct SafeRunIOSApp: App {
     @StateObject private var bridge: PhoneWatchBridge
     @StateObject private var mirroring: RemoteWorkoutCoordinator
+    @StateObject private var uploader: PhoneUploadController
 
     init() {
         let support = FileManager.default.urls(
@@ -18,15 +19,17 @@ struct SafeRunIOSApp: App {
         )
         let bridge = PhoneWatchBridge(queue: queue)
         let mirroring = RemoteWorkoutCoordinator()
+        let uploader = PhoneUploadController(queue: queue, bridge: bridge)
         bridge.activate()
         mirroring.activate()
         _bridge = StateObject(wrappedValue: bridge)
         _mirroring = StateObject(wrappedValue: mirroring)
+        _uploader = StateObject(wrappedValue: uploader)
     }
 
     var body: some Scene {
         WindowGroup {
-            IOSBootstrapView(bridge: bridge, mirroring: mirroring)
+            IOSBootstrapView(bridge: bridge, mirroring: mirroring, uploader: uploader)
         }
     }
 }
@@ -34,6 +37,7 @@ struct SafeRunIOSApp: App {
 private struct IOSBootstrapView: View {
     @ObservedObject var bridge: PhoneWatchBridge
     @ObservedObject var mirroring: RemoteWorkoutCoordinator
+    @ObservedObject var uploader: PhoneUploadController
 
     var body: some View {
         VStack(spacing: 12) {
@@ -69,6 +73,24 @@ private struct IOSBootstrapView: View {
             GroupBox("Workout recovery") {
                 diagnostic("Mirrored state", mirroring.state)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            GroupBox("Backend upload") {
+                VStack(alignment: .leading, spacing: 6) {
+                    diagnostic("Auth/config", uploader.configurationStatus)
+                    diagnostic("Worker", uploader.diagnostics.isDraining ? "uploading" : "idle")
+                    diagnostic("Server session", uploader.diagnostics.lastServerSessionID ?? "none")
+                    diagnostic("Last result", uploader.diagnostics.lastHTTPResult ?? "none")
+                    diagnostic("Attempts", "\(uploader.diagnostics.attemptCount)")
+                    diagnostic(
+                        "Next retry",
+                        uploader.diagnostics.nextRetryAt?.formatted(date: .omitted, time: .standard) ?? "none"
+                    )
+                    diagnostic("Terminal", "\(uploader.diagnostics.terminalCount)")
+                    if let error = uploader.diagnostics.lastErrorCode { diagnostic("Upload error", error) }
+                    Button("Retry now") { uploader.retryNow() }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding()

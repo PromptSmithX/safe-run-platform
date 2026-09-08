@@ -1,0 +1,8 @@
+{
+  "projects": {
+    "default": "demo-safe-run",
+    "dev": "safe-run-dev",
+    "staging": "safe-run-staging",
+    "prod": "safe-run-prod"
+  }
+}
