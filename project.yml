@@ -33,6 +33,11 @@ targets:
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
+        NSHealthShareUsageDescription: Safe Run receives the lifecycle of workouts started on the paired Apple Watch for recovery and diagnostics.
+    entitlements:
+      path: Apps/iOS/SafeRunIOS.entitlements
+      properties:
+        com.apple.developer.healthkit: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.saferun.mvp.ios
@@ -40,6 +45,8 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
     dependencies:
       - package: SafeRunDomain
+      - target: SafeRunPhoneCore
+        embed: true
       - target: SafeRunWatchApp
         embed: true
 
@@ -90,6 +97,36 @@ targets:
       - package: SafeRunDomain
       - sdk: HealthKit.framework
       - sdk: CoreLocation.framework
+      - sdk: WatchConnectivity.framework
+
+  SafeRunPhoneCore:
+    type: framework
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Apps/PhoneCore/Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.saferun.mvp.phonecore
+        PRODUCT_NAME: SafeRunPhoneCore
+    dependencies:
+      - package: SafeRunDomain
+      - sdk: WatchConnectivity.framework
+      - sdk: HealthKit.framework
+      - sdk: libsqlite3.tbd
+
+  SafeRunPhoneCoreTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Apps/PhoneCore/Tests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.saferun.mvp.phonecore.tests
+    dependencies:
+      - target: SafeRunPhoneCore
+      - package: SafeRunDomain
 
   SafeRunWatchCoreTests:
     type: bundle.unit-test
@@ -137,3 +174,12 @@ schemes:
     test:
       targets:
         - SafeRunWatchCoreTests
+
+  SafeRunPhoneCore:
+    build:
+      targets:
+        SafeRunPhoneCore: all
+        SafeRunPhoneCoreTests: [test]
+    test:
+      targets:
+        - SafeRunPhoneCoreTests

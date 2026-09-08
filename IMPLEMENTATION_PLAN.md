@@ -25,10 +25,10 @@ Before making any implementation change:
 
 | Field | Value |
 | --- | --- |
-| Repository maturity | M0 scaffold plus Milestone A Watch prototype source exist. Xcode generation, Swift tests, simulator builds, and physical-device validation are pending. |
-| Current milestone | `A — Local Watch prototype (at risk; M0 verification deferred)` |
+| Repository maturity | M0 scaffold, Milestone A Watch prototype, and Milestone B reliable Watch-to-iPhone transport source exist. Apple builds/tests and physical-device validation are pending. |
+| Current milestone | `B — Watch-to-iPhone transport (at risk; M0/A verification deferred)` |
 | Current status | `blocked` |
-| Exact next action | On macOS with XcodeGen/Xcode installed, run `bash Scripts/verify-a.sh`; fix M0/A generation, test, and build failures, then complete the 60-minute physical Apple Watch test. |
+| Exact next action | On macOS with XcodeGen/Xcode installed, run `bash Scripts/verify-b.sh`; resolve all generation/build/test failures, then execute the M0/A/B physical-device test matrices before changing any milestone to complete. |
 | Known implementation prerequisite | Build and device validation require macOS with a current Xcode/watchOS SDK plus physical Apple Watch and iPhone. |
 | Known blockers | The current Windows host has no Swift, XcodeGen, or Xcode, so the generated project and Swift tests cannot be verified here. |
 
@@ -65,7 +65,7 @@ Before making any implementation change:
 
 ### B — Watch-to-iPhone transport
 
-- Status: `not_started`
+- Status: `blocked` (source implemented at risk; Apple toolchain and device verification pending)
 - Read first: [architecture](safe_run_mvp_docs/02_ARCHITECTURE.md), [watchOS guide](safe_run_mvp_docs/06_WATCHOS_GUIDE.md), [iOS gateway guide](safe_run_mvp_docs/07_IOS_GATEWAY_GUIDE.md), [state machines](safe_run_mvp_docs/03_STATE_MACHINES.md), and Prompts 3–5 in [prompt pack](safe_run_mvp_docs/12_VIBE_CODING_PROMPTS.md).
 - Deliver: versioned envelopes with monotonic sequence numbers; Watch retry queue; immediate `WCSession` messaging; iPhone durable gateway queue; persist-before-ACK semantics; priority ordering; mirrored-workout lifecycle/recovery; diagnostics on both devices.
 - Do not implement: backend upload, Firebase auth, caregiver push, or automatic health rules.
@@ -120,6 +120,9 @@ Phase 2 candidates are not part of any MVP milestone: Fall Detection entitlement
 | 2026-09-07 | Start at M0 and implement one milestone at a time. | The architecture depends on tested foundations, especially the Watch-to-iPhone critical path. | [Roadmap](safe_run_mvp_docs/13_ROADMAP.md) |
 | 2026-09-08 | Allow Milestone A source work at risk while M0 remains blocked. | The user chose to defer macOS validation without falsely marking M0 complete. | User direction |
 | 2026-09-08 | Declare workout and location background modes with `WKBackgroundModes=workout-processing` and `UIBackgroundModes=location`. | Apple assigns workout processing and continuous location to separate plist keys. | Apple platform requirements |
+| 2026-09-08 | Allow Milestone B source work at risk while M0/A remain blocked. | The user explicitly requested the next implementation step while preserving evidence-based completion status. | User direction |
+| 2026-09-08 | Use an atomic JSON retry queue on Watch and system SQLite on iPhone. | This keeps Watch persistence small and dependency-free while giving the gateway transactional dedupe and durable ordering. | Milestone B plan |
+| 2026-09-08 | Restrict workout mirroring to lifecycle and recovery. | WatchConnectivity remains the durable packet and critical-event path; iPhone does not control the workout in B. | Locked architecture |
 
 ## Handoff log
 
@@ -146,6 +149,17 @@ Add a new entry after each completed or blocked implementation session. Do not c
 - Decisions recorded: Location quality defaults to 20 seconds/50 meters with a 5-meter distance filter; location denial is nonfatal; Debug simulator or `-SafeRunFakeData` selects fake providers; HR older than five seconds is hidden as stale.
 - Open risks or blockers: M0 and A may still expose compiler/project-generation issues on macOS; signing and real HealthKit/location behavior are unverified; the required 60-minute Watch test remains outstanding.
 - Exact next action: Run `bash Scripts/verify-a.sh` on macOS, resolve every failure, then perform the authorization, background, workout-save, GPS, and 60-minute Apple Watch test matrix before marking M0/A complete.
+
+### 2026-09-08: Milestone B reliable transport source prepared
+
+- Milestone/status: `B — blocked (implemented at risk; M0/A also blocked)`
+- Completed: Added transport contracts and ACK semantics; atomic Watch retry/session queues; priority drain and bounded telemetry retention; local run lifecycle/10-second telemetry packet generation; immediate WatchConnectivity bridge; transactional SQLite iPhone gateway with dedupe and persist-before-ACK; lifecycle-only workout mirroring; diagnostics on both apps; Domain, WatchCore, and PhoneCore tests; and the B verification script.
+- Changed files: `project.yml`, `Packages/SafeRunDomain/`, `Apps/Watch/`, `Apps/WatchCore/`, `Apps/iOS/`, `Apps/PhoneCore/`, `Scripts/verify-b.sh`, and this plan.
+- Verification run: Inspected all new source paths and target declarations; confirmed WatchConnectivity/HealthKit/SQLite dependencies; confirmed persist-before-send and commit-before-ACK code paths; scanned app source for Firebase/network uploader/check-in/automatic-rule implementation; checked this Windows host for Swift, XcodeGen, and Xcode.
+- Verification result: Static structure and scope checks passed. Swift compilation, XcodeGen generation, unit tests, simulator builds, locked-iPhone transport, disconnect/reconnect, restart recovery, and physical workout mirroring were not run because this host has no Apple toolchain or paired devices.
+- Decisions recorded: JSON Watch queue capped at 120 P3 packets; SQLite gateway capped at 10,000 pending P3 packets; P0-P2 are not pressure-evicted; 15-second ACK timeout; local UUID session IDs; SQLite WAL plus FULL synchronous commits; complete-until-first-user-authentication file protection.
+- Open risks or blockers: New Swift concurrency annotations, WatchConnectivity delegate signatures, HealthKit mirroring APIs, SQLite module linkage, generated entitlements, and simulator destinations require macOS compilation; background delivery and recovery semantics require a paired Watch/iPhone; M0/A verification remains outstanding.
+- Exact next action: Run `bash Scripts/verify-b.sh` on macOS, fix every generation/build/test failure, then execute the M0/A/B physical-device test matrices before marking any blocked milestone complete.
 
 ### Template — YYYY-MM-DD: concise session title
 

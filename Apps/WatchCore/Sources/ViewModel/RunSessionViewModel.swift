@@ -12,12 +12,15 @@ public final class RunSessionViewModel: ObservableObject {
     @Published public private(set) var locationAvailable = true
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var lastSummary: WorkoutSummary?
+    @Published public private(set) var transportSessionID: String?
+    @Published public private(set) var lastPacketSequence: Int?
 
     private let workoutProvider: any WorkoutDataProviding
     private let locationProvider: any LocationDataProviding
     private let safetyConfig: RunnerSafetyConfig
     private let locationPolicy: LocationQualityPolicy
     private let now: () -> Date
+    private var packetCoordinator: WatchRunPacketCoordinator?
 
     public init(
         workoutProvider: any WorkoutDataProviding,
@@ -38,6 +41,14 @@ public final class RunSessionViewModel: ObservableObject {
         locationProvider.onLocation = { [weak self] reading in
             self?.latestLocation = reading
             self?.locationAvailable = true
+        }
+    }
+
+    public func attachPacketCoordinator(_ coordinator: WatchRunPacketCoordinator) {
+        packetCoordinator = coordinator
+        coordinator.onSessionProgress = { [weak self] sessionID, sequence in
+            self?.transportSessionID = sessionID
+            self?.lastPacketSequence = sequence
         }
     }
 
@@ -73,6 +84,7 @@ public final class RunSessionViewModel: ObservableObject {
             if locationAvailable {
                 locationProvider.startUpdatingLocation()
             }
+            await packetCoordinator?.runDidStart()
         } catch {
             locationProvider.stopUpdatingLocation()
             fail(with: error)
@@ -93,6 +105,7 @@ public final class RunSessionViewModel: ObservableObject {
         } catch {
             fail(with: error)
         }
+        await packetCoordinator?.runDidEnd()
     }
 
     public func reset() {
@@ -140,6 +153,16 @@ public final class RunSessionViewModel: ObservableObject {
         return age >= 0 && age <= locationPolicy.maximumAge ? .fresh : .stale
     }
 
+    public func telemetrySample() -> RunTelemetrySample? {
+        guard state == .active, let startedAt else { return nil }
+        return RunTelemetrySample(
+            startedAt: startedAt,
+            heartRateBPM: heartRateBPM,
+            heartRateSampleDate: heartRateSampleDate,
+            location: latestLocation
+        )
+    }
+
     private func apply(_ snapshot: WorkoutSnapshot) {
         if state != .ending {
             state = snapshot.state
@@ -154,4 +177,3 @@ public final class RunSessionViewModel: ObservableObject {
         errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 }
-

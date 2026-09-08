@@ -5,6 +5,7 @@ import SafeRunDomain
 @MainActor
 public final class HealthKitWorkoutProvider: NSObject, WorkoutDataProviding {
     public var onSnapshot: ((WorkoutSnapshot) -> Void)?
+    public var onMirroringError: ((String) -> Void)?
 
     private let healthStore: HKHealthStore
     private var session: HKWorkoutSession?
@@ -69,6 +70,14 @@ public final class HealthKitWorkoutProvider: NSObject, WorkoutDataProviding {
 
         do {
             try await beginCollection(builder, at: date)
+            session.startMirroringToCompanionDevice { [weak self] success, error in
+                guard !success else { return }
+                Task { @MainActor in
+                    self?.onMirroringError?(
+                        error?.localizedDescription ?? "Workout mirroring unavailable."
+                    )
+                }
+            }
             emit(state: .active)
         } catch {
             session.end()
@@ -247,4 +256,3 @@ extension HealthKitWorkoutProvider: HKLiveWorkoutBuilderDelegate {
         }
     }
 }
-
