@@ -25,10 +25,10 @@ Before making any implementation change:
 
 | Field | Value |
 | --- | --- |
-| Repository maturity | M0 through Milestone C source exists, including the Watch prototype, durable Watch–iPhone transport, Firebase ingestion backend, and iPhone uploader. Emulator, Apple builds, and physical-device validation are pending. |
-| Current milestone | `C — Backend ingestion and iPhone uploader (at risk; M0–B verification deferred)` |
+| Repository maturity | M0 through Milestone D source exists, including manual Watch SOS/cancellation, idempotent incident fan-out, caregiver device registration, standard push integration, and incident detail. Emulator, Apple builds, APNs/FCM, and physical-device validation are pending. |
+| Current milestone | `D — Manual SOS end to end (at risk; M0–C verification deferred)` |
 | Current status | `blocked` |
-| Exact next action | On macOS with Node 22, Java, XcodeGen, and Xcode installed, run `bash Scripts/verify-c.sh`; resolve every failure before beginning the staged 60-minute device run. |
+| Exact next action | On macOS with Node 22, Java, XcodeGen, and Xcode installed, run `bash Scripts/verify-d.sh`; resolve every failure before configuring staging APNs/FCM and beginning physical SOS tests. |
 | Known implementation prerequisite | Build and device validation require macOS with a current Xcode/watchOS SDK plus physical Apple Watch and iPhone. |
 | Known blockers | The current Windows host has no Swift, XcodeGen, or Xcode, so the generated project and Swift tests cannot be verified here. |
 
@@ -83,7 +83,7 @@ Before making any implementation change:
 
 ### D — Manual SOS end to end
 
-- Status: `not_started`
+- Status: `blocked` (source implemented at risk; emulator, Apple toolchain, staging push, and device verification pending; M0–C remain blocked)
 - Read first: [PRD](safe_run_mvp_docs/01_PRD_MVP.md), [alert engine](safe_run_mvp_docs/09_ALERT_ENGINE.md), [iOS gateway guide](safe_run_mvp_docs/07_IOS_GATEWAY_GUIDE.md), [Firebase blueprint](safe_run_mvp_docs/08_BACKEND_FIREBASE.md), and Prompt 8 in [prompt pack](safe_run_mvp_docs/12_VIBE_CODING_PROMPTS.md).
 - Deliver: guarded but quick Watch SOS interaction; Watch-generated event and incident IDs; P0 transmission/retry; idempotent incident creation; caregiver device registration, standard push, and incident detail with last known context and call action.
 - Do not implement: automatic physiological alerts, Critical Alerts entitlement, or emergency-service calling.
@@ -126,6 +126,10 @@ Phase 2 candidates are not part of any MVP milestone: Fall Detection entitlement
 | 2026-09-08 | Implement Milestone C at risk with Firebase Emulator first. | The user chose to continue without creating cloud projects or falsely completing unverified Apple milestones. | User direction |
 | 2026-09-08 | Use Cloud Functions 2nd gen on Node 22 and Firebase Anonymous Auth for the runner MVP. | This gives an emulator-testable ingestion path while keeping identity replaceable behind an iPhone token-provider protocol. | Milestone C plan |
 | 2026-09-08 | Rotate the session ingest token on idempotent create-session retry and keep only its SHA-256 hash server-side. | A client can recover from a lost create response without requiring the backend to store or replay the raw secret. | Security design |
+| 2026-09-08 | Implement Milestone D at risk with one iOS app supporting runner and caregiver roles. | The user requested continued source progress while preserving the blocked status of unverified Apple milestones. | User direction |
+| 2026-09-08 | Provision caregiver membership and runner E.164 phone data outside the public MVP API. | Manual family invitation and phone verification are intentionally outside D while incident access remains server-authorized. | Milestone D plan |
+| 2026-09-08 | Model an accidental SOS cancellation as a new P0 event with the original incident ID. | This preserves the durable Watch-to-backend path and makes cancellation idempotent without inventing a second transport. | Milestone D plan |
+| 2026-09-08 | Use Firestore fan-out markers plus per-device attempts and an Emulator-only fake push outbox. | Firestore triggers are at-least-once; stable attempts limit duplicate logical fan-out while real APNs delivery remains a staged-device requirement. | Milestone D plan |
 
 ## Handoff log
 
@@ -174,6 +178,17 @@ Add a new entry after each completed or blocked implementation session. Do not c
 - Decisions recorded: Emulator project `demo-safe-run`; Node 22; Functions region `asia-southeast1`; Firebase Apple SDK 12.18.0; anonymous runner with deterministic personal family; four-hour active ingest-token TTL plus a 24-hour revoked-hash window used only for idempotent end retries; Keychain after-first-unlock-this-device-only; 30-second sample buckets; terminal 4xx rows retained; no FCM sender in C.
 - Open risks or blockers: The host uses Node 24 rather than the Node 22 deployment runtime and lacks Java/Firebase Emulator/Xcode. npm audit reports seven moderate advisories in transitive `firebase-admin` storage dependencies; the suggested forced remediation is a breaking Firebase Admin downgrade, so it was not applied. All new Swift concurrency, SQLite migration, Firebase Auth, background execution, and URLSession behavior remains uncompiled here.
 - Exact next action: Run `bash Scripts/verify-c.sh` on a macOS machine with Node 22, Java, XcodeGen, and Xcode, and fix every reported failure before the staged device run.
+
+### 2026-09-08: Milestone D manual SOS source prepared
+
+- Milestone/status: `D — blocked (implemented at risk; M0–C also blocked)`
+- Completed: Added guarded Watch SOS and cancellation UI; Watch-generated event/incident IDs with fresh context and P0 queueing; cancellation contract; caregiver device registration/deactivation; family-authorized incident read and acknowledgement; idempotent Firestore marker/attempt fan-out with invalid-token handling and privacy-safe alert/cancellation payloads; Emulator fake push outbox and guarded family seed; one-app runner/caregiver UI, Keychain installation identity, FCM/APNs registration, deep-link dedupe, incident detail, acknowledgement and explicit call action; verification scripts and contract documentation.
+- Changed files: `project.yml`, `Packages/SafeRunDomain/`, `Apps/Watch*`, `Apps/PhoneCore/`, `Apps/iOS/`, `Backend/`, `Scripts/verify-d*`, `safe_run_mvp_docs/`, and this plan.
+- Verification run: Ran backend TypeScript typecheck and production build twice; ran backend unit tests twice; parsed JSON Schema, OpenAPI and XcodeGen YAML; ran `git diff --check`; scanned release source for sensitive push/token logging; confirmed the Emulator seed refuses a non-demo project.
+- Verification result: Backend typecheck/build and unit tests passed; contract/project files parsed and static privacy checks passed. Firebase Emulator integration tests were not run because Java is missing. Swift tests, XcodeGen generation, Firebase Apple SDK resolution and simulator/device builds were not run because this Windows host lacks Swift/XcodeGen/Xcode. Real APNs/FCM delivery and the required physical SOS matrix remain unverified.
+- Decisions recorded: One iOS app with locally selected runner/caregiver role; active caregiver membership and runner phone provisioned by a trusted process; two-second Watch hold; cancellation uses `manual_sos_cancelled` P0 with the original incident ID; standard privacy-safe notification with incident collapse ID; fake push is restricted to the Emulator; no Critical Alerts or automatic rules.
+- Open risks or blockers: All new Swift concurrency/UI/Firebase Messaging code remains uncompiled; Firestore trigger concurrency and indexes need Emulator validation; real fan-out requires a staged Firebase project, APNs key, signing, two provisioned users and physical devices; M0–C verification is still outstanding.
+- Exact next action: Run `bash Scripts/verify-d.sh` on a macOS machine with Node 22, Java, XcodeGen, and Xcode, and fix every reported failure before staging push configuration.
 
 ### Template — YYYY-MM-DD: concise session title
 

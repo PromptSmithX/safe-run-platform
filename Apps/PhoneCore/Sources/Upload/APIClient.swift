@@ -12,6 +12,13 @@ public protocol SafeRunAPIClientProtocol: Sendable {
     func endSession(serverSessionID: String, ingestToken: String, request: EndRunSessionRequest) async throws
 }
 
+public protocol CaregiverAPIClientProtocol: Sendable {
+    func registerDevice(_ request: DeviceRegistrationRequest, userToken: String) async throws -> DeviceRegistrationResponse
+    func deactivateDevice(deviceID: UUID, userToken: String) async throws -> DeviceRegistrationResponse
+    func incident(id: UUID, userToken: String) async throws -> IncidentDetail
+    func acknowledgeIncident(id: UUID, request: IncidentAcknowledgementRequest, userToken: String) async throws -> IncidentAcknowledgementResponse
+}
+
 public struct APIClientFailure: Error, Equatable, Sendable {
     public let statusCode: Int?
     public let code: String
@@ -64,6 +71,26 @@ public final class SafeRunAPIClient: SafeRunAPIClientProtocol, @unchecked Sendab
         )
     }
 
+    public func registerDevice(_ request: DeviceRegistrationRequest, userToken: String) async throws -> DeviceRegistrationResponse {
+        try await send(path: "v1/devices", method: "POST", token: userToken, body: request)
+    }
+
+    public func deactivateDevice(deviceID: UUID, userToken: String) async throws -> DeviceRegistrationResponse {
+        try await send(path: "v1/devices/\(deviceID.uuidString)", method: "DELETE", token: userToken, rawBody: Data())
+    }
+
+    public func incident(id: UUID, userToken: String) async throws -> IncidentDetail {
+        try await send(path: "v1/incidents/\(id.uuidString)", method: "GET", token: userToken, rawBody: Data())
+    }
+
+    public func acknowledgeIncident(
+        id: UUID,
+        request: IncidentAcknowledgementRequest,
+        userToken: String
+    ) async throws -> IncidentAcknowledgementResponse {
+        try await send(path: "v1/incidents/\(id.uuidString)/acknowledge", method: "POST", token: userToken, body: request)
+    }
+
     private func send<Response: Decodable, Body: Encodable>(
         path: String, method: String, token: String, idempotencyKey: String? = nil, body: Body
     ) async throws -> Response {
@@ -113,3 +140,5 @@ public final class SafeRunAPIClient: SafeRunAPIClientProtocol, @unchecked Sendab
         }
     }
 }
+
+extension SafeRunAPIClient: CaregiverAPIClientProtocol {}

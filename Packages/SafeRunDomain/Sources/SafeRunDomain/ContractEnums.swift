@@ -43,8 +43,25 @@ public enum SafetyEventType: String, Codable, CaseIterable, Equatable, Sendable 
     case checkInHelpRequested = "check_in_help_requested"
     case checkInTimeout = "check_in_timeout"
     case manualSOS = "manual_sos"
+    case manualSOSCancelled = "manual_sos_cancelled"
     case autoAnomalyTriggered = "auto_anomaly_triggered"
     case connectionDegraded = "connection_degraded"
     case stateSync = "state_sync"
 }
 
+public enum DeviceRole: String, Codable, CaseIterable, Equatable, Sendable {
+    case runner
+    case caregiver
+}
+
+public enum IncidentStatus: String, Codable, CaseIterable, Equatable, Sendable {
+    case checkIn = "check_in"
+    case alerted
+    case acknowledged
+    case resolved
+    case cancelled
+}
+
+public enum IncidentAcknowledgementAction: String, Codable, Equatable, Sendable {
+    case seen
+}

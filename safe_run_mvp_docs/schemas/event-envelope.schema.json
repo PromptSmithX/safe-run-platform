@@ -49,7 +49,13 @@
           "format": "uuid"
         },
         "event_type": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "session_started", "session_paused", "session_resumed", "session_ended",
+            "check_in_started", "check_in_ok", "check_in_help_requested", "check_in_timeout",
+            "manual_sos", "manual_sos_cancelled", "auto_anomaly_triggered",
+            "connection_degraded", "state_sync"
+          ]
         },
         "severity": {
           "type": "string",
@@ -76,7 +82,16 @@
           "type": "object"
         }
       },
-      "additionalProperties": true
+      "additionalProperties": true,
+      "allOf": [{
+        "if": { "properties": { "event_type": { "const": "manual_sos_cancelled" } } },
+        "then": {
+          "properties": {
+            "severity": { "const": "critical" },
+            "incident_id": { "type": "string", "format": "uuid" }
+          }
+        }
+      }]
     }
   },
   "additionalProperties": false

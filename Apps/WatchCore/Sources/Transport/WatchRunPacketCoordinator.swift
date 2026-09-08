@@ -20,6 +20,24 @@ public struct RunTelemetrySample: Equatable, Sendable {
     }
 }
 
+public struct ManualSOSReceipt: Equatable, Sendable {
+    public let eventID: UUID
+    public let incidentID: UUID
+    public let queuedAt: Date
+
+    public init(eventID: UUID, incidentID: UUID, queuedAt: Date) {
+        self.eventID = eventID
+        self.incidentID = incidentID
+        self.queuedAt = queuedAt
+    }
+}
+
+@MainActor
+public protocol ManualSOSDispatching: AnyObject {
+    func queueManualSOS() async throws -> ManualSOSReceipt
+    func queueManualSOSCancellation(incidentID: UUID) async throws -> ManualSOSReceipt
+}
+
 @MainActor
 public final class WatchRunPacketCoordinator {
     public var onSessionProgress: ((String, Int) -> Void)?
@@ -29,6 +47,7 @@ public final class WatchRunPacketCoordinator {
     private let staleHeartRateSeconds: TimeInterval
     private let sample: () -> RunTelemetrySample?
     private let now: () -> Date
+    private let makeUUID: () -> UUID
     private var telemetryTask: Task<Void, Never>?
 
     public init(
@@ -37,6 +56,7 @@ public final class WatchRunPacketCoordinator {
         telemetryInterval: TimeInterval = 10,
         staleHeartRateSeconds: TimeInterval = 5,
         now: @escaping () -> Date = Date.init,
+        makeUUID: @escaping () -> UUID = UUID.init,
         sample: @escaping () -> RunTelemetrySample?
     ) {
         self.transport = transport
@@ -44,6 +64,7 @@ public final class WatchRunPacketCoordinator {
         self.telemetryInterval = telemetryInterval
         self.staleHeartRateSeconds = staleHeartRateSeconds
         self.now = now
+        self.makeUUID = makeUUID
         self.sample = sample
     }
 
@@ -102,29 +123,72 @@ public final class WatchRunPacketCoordinator {
         try await transport.enqueue(TransportPacket.decodeEnvelope(data))
     }
 
-    private func enqueueEvent(_ type: SafetyEventType) async throws {
+    public func queueManualSOS() async throws -> ManualSOSReceipt {
+        let eventID = makeUUID()
+        let incidentID = makeUUID()
+        let date = now()
+        try await enqueueEvent(
+            .manualSOS,
+            severity: .critical,
+            eventID: eventID,
+            incidentID: incidentID,
+            at: date
+        )
+        return ManualSOSReceipt(eventID: eventID, incidentID: incidentID, queuedAt: date)
+    }
+
+    public func queueManualSOSCancellation(incidentID: UUID) async throws -> ManualSOSReceipt {
+        let eventID = makeUUID()
+        let date = now()
+        try await enqueueEvent(
+            .manualSOSCancelled,
+            severity: .critical,
+            eventID: eventID,
+            incidentID: incidentID,
+            at: date
+        )
+        return ManualSOSReceipt(eventID: eventID, incidentID: incidentID, queuedAt: date)
+    }
+
+    private func enqueueEvent(
+        _ type: SafetyEventType,
+        severity: IncidentSeverity = .info,
+        eventID: UUID = UUID(),
+        incidentID: UUID? = nil,
+        at date: Date? = nil
+    ) async throws {
         let issued = try await sessionStore.issueNext()
         onSessionProgress?(issued.sessionID, issued.sequence)
-        let date = now()
-        let currentSample = sample()
+        let date = date ?? now()
         let envelope = EventEnvelope(
             sessionID: issued.sessionID,
             sequence: issued.sequence,
             watchTimestamp: date,
             payload: EventPayload(
+                eventID: eventID,
                 eventType: type,
-                severity: .info,
-                context: EventContext(
-                    heartRateBPM: currentSample?.heartRateBPM,
-                    lastLocation: currentSample?.location.map {
-                        LastKnownLocation(latitude: $0.latitude, longitude: $0.longitude)
-                    },
-                    elapsedSeconds: currentSample.map { max(0, Int(date.timeIntervalSince($0.startedAt))) }
-                )
+                severity: severity,
+                incidentID: incidentID,
+                context: eventContext(at: date)
             )
         )
         let data = try SafeRunJSON.makeEncoder().encode(envelope)
         try await transport.enqueue(TransportPacket.decodeEnvelope(data))
+    }
+
+    private func eventContext(at date: Date) -> EventContext? {
+        guard let current = sample() else { return nil }
+        let heartRateAge = current.heartRateSampleDate.map { date.timeIntervalSince($0) }
+        let heartRateIsFresh = heartRateAge.map { $0 >= 0 && $0 <= staleHeartRateSeconds } ?? false
+        let locationAge = current.location.map { date.timeIntervalSince($0.timestamp) }
+        let locationIsFresh = locationAge.map { $0 >= 0 && $0 <= 20 } ?? false
+        return EventContext(
+            heartRateBPM: heartRateIsFresh ? current.heartRateBPM : nil,
+            lastLocation: locationIsFresh ? current.location.map {
+                LastKnownLocation(latitude: $0.latitude, longitude: $0.longitude)
+            } : nil,
+            elapsedSeconds: max(0, Int(date.timeIntervalSince(current.startedAt)))
+        )
     }
 
     private func startTelemetryTimer() {
@@ -139,3 +203,5 @@ public final class WatchRunPacketCoordinator {
         }
     }
 }
+
+extension WatchRunPacketCoordinator: ManualSOSDispatching {}

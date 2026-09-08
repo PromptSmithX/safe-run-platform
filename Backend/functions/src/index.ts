@@ -8,3 +8,4 @@ initializeApp();
 const { app } = require("./app") as typeof import("./app");
 
 export const api = onRequest({ region: "asia-southeast1", cors: false, timeoutSeconds: 60, memory: "256MiB" }, app);
+export { fanoutIncident } from "./fanout";

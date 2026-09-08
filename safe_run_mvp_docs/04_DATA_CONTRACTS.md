@@ -77,6 +77,7 @@ Recommended `event_type` enum:
 - `check_in_help_requested`
 - `check_in_timeout`
 - `manual_sos`
+- `manual_sos_cancelled` — P0 update with a new `event_id` and the original manual-SOS `incident_id`.
 - `auto_anomaly_triggered`
 - `connection_degraded`
 - `state_sync`
@@ -157,6 +158,7 @@ Backend must enforce:
 - unique `event_id`;
 - unique `incident_id`;
 - do not send a second push fan-out for an incident already in `alerted|acknowledged|resolved` unless it is an explicit escalation update.
+- a `manual_sos_cancelled` event idempotently transitions its matching manual-SOS incident to `cancelled`; it never creates a second incident.
 
 ## 8. Queue priority
 

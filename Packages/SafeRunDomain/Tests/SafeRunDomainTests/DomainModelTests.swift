@@ -17,6 +17,7 @@ final class DomainModelTests: XCTestCase {
 
     func testSafetyEventRawValuesMatchMVPContract() {
         XCTAssertEqual(SafetyEventType.manualSOS.rawValue, "manual_sos")
+        XCTAssertEqual(SafetyEventType.manualSOSCancelled.rawValue, "manual_sos_cancelled")
         XCTAssertEqual(SafetyEventType.checkInOK.rawValue, "check_in_ok")
         XCTAssertEqual(SafetyEventType.stateSync.rawValue, "state_sync")
         XCTAssertFalse(SafetyEventType.allCases.map(\.rawValue).contains("fall_detected"))
@@ -43,4 +44,3 @@ final class DomainModelTests: XCTestCase {
         XCTAssertEqual(config.telemetryIntervalSeconds, 10)
     }
 }
-

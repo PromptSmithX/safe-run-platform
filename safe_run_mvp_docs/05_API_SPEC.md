@@ -95,6 +95,8 @@ Body: event envelope.
 
 For `manual_sos`, `check_in_timeout`, `check_in_help_requested`, backend creates or updates `Incident` and immediately fans out push.
 
+`manual_sos_cancelled` is a critical-priority state update with a new `event_id` and the original `incident_id`. It can only cancel a matching manual-SOS incident in the same session. It never creates a new incident; if alert fan-out has already begun, it creates one idempotent cancellation update fan-out.
+
 Response:
 
 ```json
@@ -142,6 +144,8 @@ User-authenticated.
 
 Backend should support token rotation and soft-delete invalid tokens after FCM feedback.
 
+Milestone D requires a stable client-generated `device_id`. Re-registering the same ID rotates its token. `DELETE /v1/devices/{device_id}` soft-deactivates it and removes the stored token. A caregiver registration is accepted only for an active caregiver family member.
+
 ## 7. Read active family session
 
 `GET /v1/families/{family_id}/active-run`
@@ -153,6 +157,7 @@ Returns only if requester is an authorized family member.
 `GET /v1/incidents/{incident_id}`
 
 Includes latest context and acknowledgement state.
+It may include the provisioned runner display name and E.164 phone number, but only after server-side family membership authorization.
 
 ## 9. Acknowledge incident
 
@@ -169,6 +174,8 @@ Possible future actions:
 - `calling_runner`
 - `going_to_runner`
 - `resolved`
+
+The Milestone D implementation accepts only `seen`, preserves the first acknowledgement, and treats retries idempotently.
 
 ## 10. HTTP error model
 

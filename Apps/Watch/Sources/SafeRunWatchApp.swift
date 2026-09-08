@@ -1,12 +1,14 @@
 import SafeRunDomain
 import SafeRunWatchCore
 import SwiftUI
+import WatchKit
 
 @main
 @MainActor
 struct SafeRunWatchApplication: App {
     @StateObject private var viewModel: RunSessionViewModel
     @StateObject private var transport: WatchConnectivityTransport
+    @StateObject private var sos: ManualSOSController
 
     init() {
         let providers = WatchProviderFactory.make()
@@ -29,14 +31,16 @@ struct SafeRunWatchApplication: App {
             sample: { [weak viewModel] in viewModel?.telemetrySample() }
         )
         viewModel.attachPacketCoordinator(coordinator)
+        let sos = ManualSOSController(dispatcher: coordinator)
         transport.activate()
         _viewModel = StateObject(wrappedValue: viewModel)
         _transport = StateObject(wrappedValue: transport)
+        _sos = StateObject(wrappedValue: sos)
     }
 
     var body: some Scene {
         WindowGroup {
-            RunSessionView(viewModel: viewModel, transport: transport)
+            RunSessionView(viewModel: viewModel, transport: transport, sos: sos)
         }
     }
 }
@@ -74,6 +78,8 @@ private enum WatchProviderFactory {
 private struct RunSessionView: View {
     @ObservedObject var viewModel: RunSessionViewModel
     @ObservedObject var transport: WatchConnectivityTransport
+    @ObservedObject var sos: ManualSOSController
+    @State private var isHoldingSOS = false
 
     var body: some View {
         Group {
@@ -106,6 +112,7 @@ private struct RunSessionView: View {
 
             Button("Start run") {
                 Task {
+                    sos.resetForRun()
                     await viewModel.start()
                 }
             }
@@ -154,6 +161,8 @@ private struct RunSessionView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                sosControls
+
                 Button("Stop") {
                     Task {
                         await viewModel.stop()
@@ -162,6 +171,55 @@ private struct RunSessionView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
                 .accessibilityHint("Stops and saves the current workout")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var sosControls: some View {
+        switch sos.state {
+        case .idle, .failed:
+            VStack(spacing: 3) {
+                Button {
+                    // Long press below is the deliberate activation path.
+                } label: {
+                    Label(isHoldingSOS ? "Tiếp tục giữ…" : "Giữ SOS 2 giây", systemImage: "sos.circle.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .onLongPressGesture(minimumDuration: 2, maximumDistance: 30) {
+                    isHoldingSOS = false
+                    WKInterfaceDevice.current().play(.notification)
+                    Task { await sos.trigger() }
+                } onPressingChanged: { pressing in
+                    isHoldingSOS = pressing
+                }
+                .accessibilityLabel("SOS")
+                .accessibilityHint("Giữ hai giây để xếp hàng cảnh báo cho người thân")
+
+                if case .failed(let message) = sos.state {
+                    Text(message).font(.system(size: 8)).foregroundStyle(.orange)
+                }
+            }
+        case .queueing:
+            ProgressView("Đang xếp hàng SOS…")
+        case .queued(let receipt):
+            VStack(spacing: 3) {
+                Text("SOS đã xếp hàng • …\(receipt.incidentID.uuidString.suffix(6))")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.orange)
+                Button("Hủy cảnh báo") { Task { await sos.cancel() } }
+                    .buttonStyle(.bordered)
+            }
+        case .cancelling:
+            ProgressView("Đang xếp hàng yêu cầu hủy…")
+        case .cancellationQueued:
+            VStack(spacing: 3) {
+                Text("Yêu cầu hủy đã xếp hàng")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.orange)
+                Button("Xong") { sos.resetAfterCancellation() }
             }
         }
     }

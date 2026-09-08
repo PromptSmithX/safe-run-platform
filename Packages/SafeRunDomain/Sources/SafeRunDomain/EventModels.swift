@@ -53,6 +53,10 @@ public struct EventPayload: Codable, Equatable, Sendable {
         incidentID: UUID? = nil,
         context: EventContext? = nil
     ) {
+        precondition(
+            eventType != .manualSOSCancelled || (severity == .critical && incidentID != nil),
+            "manual_sos_cancelled must be critical and include incident_id."
+        )
         self.eventID = eventID
         self.eventType = eventType
         self.severity = severity
@@ -88,6 +92,13 @@ public struct EventPayload: Codable, Equatable, Sendable {
         self.ruleID = try container.decodeIfPresent(String.self, forKey: .ruleID)
         self.incidentID = try container.decodeIfPresent(UUID.self, forKey: .incidentID)
         self.context = try container.decodeIfPresent(EventContext.self, forKey: .context)
+        if eventType == .manualSOSCancelled && (severity != .critical || incidentID == nil) {
+            throw DecodingError.dataCorruptedError(
+                forKey: .incidentID,
+                in: container,
+                debugDescription: "manual_sos_cancelled must be critical and include incident_id."
+            )
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
