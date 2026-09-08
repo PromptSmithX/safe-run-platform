@@ -25,10 +25,10 @@ Before making any implementation change:
 
 | Field | Value |
 | --- | --- |
-| Repository maturity | M0 through Milestone D source exists, including manual Watch SOS/cancellation, idempotent incident fan-out, caregiver device registration, standard push integration, and incident detail. Emulator, Apple builds, APNs/FCM, and physical-device validation are pending. |
-| Current milestone | `D — Manual SOS end to end (at risk; M0–C verification deferred)` |
+| Repository maturity | M0 through Milestone E source exists, including configured HR rule, Watch check-in, durable escalation and backend check-in incident semantics. Emulator, Apple builds, APNs/FCM, and physical-device validation are pending. |
+| Current milestone | `E — Check-in and first automatic rule (at risk; M0–D verification deferred)` |
 | Current status | `blocked` |
-| Exact next action | On macOS with Node 22, Java, XcodeGen, and Xcode installed, run `bash Scripts/verify-d.sh`; resolve every failure before configuring staging APNs/FCM and beginning physical SOS tests. |
+| Exact next action | On macOS with Node 22, Java, XcodeGen, and Xcode installed, run `bash Scripts/verify-e.sh`; resolve every failure before safe fake-HR and physical-device check-in tests. |
 | Known implementation prerequisite | Build and device validation require macOS with a current Xcode/watchOS SDK plus physical Apple Watch and iPhone. |
 | Known blockers | The current Windows host has no Swift, XcodeGen, or Xcode, so the generated project and Swift tests cannot be verified here. |
 
@@ -92,7 +92,7 @@ Before making any implementation change:
 
 ### E — Check-in and first automatic rule
 
-- Status: `not_started`
+- Status: `blocked` (source implemented at risk; emulator, Apple toolchain, APNs/FCM, and device verification pending; M0–D remain blocked)
 - Read first: [alert engine](safe_run_mvp_docs/09_ALERT_ENGINE.md), [state machines](safe_run_mvp_docs/03_STATE_MACHINES.md), [data contracts](safe_run_mvp_docs/04_DATA_CONTRACTS.md), and Prompts 9–10 in [prompt pack](safe_run_mvp_docs/12_VIBE_CODING_PROMPTS.md).
 - Deliver: single-active check-in coordinator with haptics/countdown; OK/help/timeout events; optional configured sustained-high-HR rule; freshness gates; warm-up grace; cooldown; hysteresis; deterministic rule-test timelines.
 - Do not implement: medical diagnoses, inferred population-based HR thresholds, additional auto rules, or AI/ML classification.
@@ -130,6 +130,8 @@ Phase 2 candidates are not part of any MVP milestone: Fall Detection entitlement
 | 2026-09-08 | Provision caregiver membership and runner E.164 phone data outside the public MVP API. | Manual family invitation and phone verification are intentionally outside D while incident access remains server-authorized. | Milestone D plan |
 | 2026-09-08 | Model an accidental SOS cancellation as a new P0 event with the original incident ID. | This preserves the durable Watch-to-backend path and makes cancellation idempotent without inventing a second transport. | Milestone D plan |
 | 2026-09-08 | Use Firestore fan-out markers plus per-device attempts and an Emulator-only fake push outbox. | Firestore triggers are at-least-once; stable attempts limit duplicate logical fan-out while real APNs delivery remains a staged-device requirement. | Milestone D plan |
+| 2026-09-08 | Implement Milestone E at risk with runner-configured thresholds synchronized as latest Watch application context. | Safety events remain on the durable queue while configuration applies only at the next run boundary. | User direction and Milestone E plan |
+| 2026-09-08 | Lock the first automatic rule to 180-second warm-up, 30-second sustained duration, three samples, 10 BPM hysteresis, 30-second re-arm and 300-second cooldown. | Conservative deterministic gating reduces noisy retriggers without implying a medical threshold. | Milestone E plan |
 
 ## Handoff log
 
@@ -200,6 +202,16 @@ Add a new entry after each completed or blocked implementation session. Do not c
 - Decisions recorded: 
 - Open risks or blockers: 
 - Exact next action: 
+
+### 2026-09-08: Milestone E check-in and configured HR-rule source prepared
+
+- Milestone/status: `E — blocked (implemented at risk; M0–D also blocked)`
+- Completed: Added backward-compatible safety configuration contracts and protected stores; iPhone runner settings and Watch application-context synchronization; deterministic sustained-HR rule with freshness, warm-up, sample count, cooldown, hysteresis and re-arm; single-active Watch check-in with OK/help/timeout events; stable incident identity and rule evidence; backend check-in/no-push/ordered-escalation semantics; schema, tests and E verification script.
+- Changed files: `Packages/SafeRunDomain/`, `Apps/WatchCore/`, `Apps/Watch/`, `Apps/PhoneCore/`, `Apps/iOS/`, `Backend/functions/`, `safe_run_mvp_docs/`, `Scripts/verify-e.sh`, and this plan.
+- Verification run: Backend TypeScript typecheck/build and Node unit tests passed; event JSON Schema parsed successfully; repository diff checks and static source scans were run.
+- Verification result: Backend non-emulator checks passed on Node 24. Firebase Emulator tests were not run because Java is unavailable. Swift compilation, XcodeGen, simulator builds, Watch/iPhone integration and APNs/FCM device scenarios were not run because this Windows host lacks the Apple toolchain and devices.
+- Open risks or blockers: Swift concurrency and WatchConnectivity application-context signatures remain uncompiled; physical check-in timing/haptics and real push dedupe remain unverified; all preceding milestones are still blocked on their verification matrices.
+- Exact next action: Run `bash Scripts/verify-e.sh` on macOS with Node 22, Java, XcodeGen and Xcode, then fix every reported failure before device testing.
 
 ## Reusable prompt for a new chat
 

@@ -91,6 +91,21 @@
             "incident_id": { "type": "string", "format": "uuid" }
           }
         }
+      }, {
+        "if": { "properties": { "event_type": { "enum": ["check_in_started", "check_in_ok", "check_in_help_requested", "check_in_timeout"] } } },
+        "then": {
+          "required": ["rule_id"],
+          "properties": { "incident_id": { "type": "string", "format": "uuid" }, "rule_id": { "const": "high_hr_sustained_v1" } }
+        }
+      }, {
+        "if": { "properties": { "event_type": { "const": "check_in_started" } } },
+        "then": { "properties": { "severity": { "const": "warning" } } }
+      }, {
+        "if": { "properties": { "event_type": { "const": "check_in_ok" } } },
+        "then": { "properties": { "severity": { "const": "info" } } }
+      }, {
+        "if": { "properties": { "event_type": { "enum": ["check_in_help_requested", "check_in_timeout"] } } },
+        "then": { "properties": { "severity": { "const": "critical" } } }
       }]
     }
   },

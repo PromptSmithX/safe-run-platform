@@ -155,7 +155,9 @@ public final class WatchRunPacketCoordinator {
         severity: IncidentSeverity = .info,
         eventID: UUID = UUID(),
         incidentID: UUID? = nil,
-        at date: Date? = nil
+        at date: Date? = nil,
+        ruleID: String? = nil,
+        evaluation: RuleEvaluationSnapshot? = nil
     ) async throws {
         let issued = try await sessionStore.issueNext()
         onSessionProgress?(issued.sessionID, issued.sequence)
@@ -168,16 +170,19 @@ public final class WatchRunPacketCoordinator {
                 eventID: eventID,
                 eventType: type,
                 severity: severity,
+                ruleID: ruleID,
                 incidentID: incidentID,
-                context: eventContext(at: date)
+                context: eventContext(at: date, evaluation: evaluation)
             )
         )
         let data = try SafeRunJSON.makeEncoder().encode(envelope)
         try await transport.enqueue(TransportPacket.decodeEnvelope(data))
     }
 
-    private func eventContext(at date: Date) -> EventContext? {
-        guard let current = sample() else { return nil }
+    private func eventContext(at date: Date, evaluation: RuleEvaluationSnapshot? = nil) -> EventContext? {
+        guard let current = sample() else {
+            return evaluation.map { EventContext(ruleEvaluation: $0) }
+        }
         let heartRateAge = current.heartRateSampleDate.map { date.timeIntervalSince($0) }
         let heartRateIsFresh = heartRateAge.map { $0 >= 0 && $0 <= staleHeartRateSeconds } ?? false
         let locationAge = current.location.map { date.timeIntervalSince($0.timestamp) }
@@ -187,7 +192,8 @@ public final class WatchRunPacketCoordinator {
             lastLocation: locationIsFresh ? current.location.map {
                 LastKnownLocation(latitude: $0.latitude, longitude: $0.longitude)
             } : nil,
-            elapsedSeconds: max(0, Int(date.timeIntervalSince(current.startedAt)))
+            elapsedSeconds: max(0, Int(date.timeIntervalSince(current.startedAt))),
+            ruleEvaluation: evaluation
         )
     }
 
@@ -205,3 +211,9 @@ public final class WatchRunPacketCoordinator {
 }
 
 extension WatchRunPacketCoordinator: ManualSOSDispatching {}
+
+extension WatchRunPacketCoordinator: CheckInEventDispatching {
+    public func queueCheckInEvent(_ type: SafetyEventType, severity: IncidentSeverity, incidentID: UUID, evaluation: RuleEvaluationSnapshot?) async throws {
+        try await enqueueEvent(type, severity: severity, incidentID: incidentID, ruleID: "high_hr_sustained_v1", evaluation: evaluation)
+    }
+}

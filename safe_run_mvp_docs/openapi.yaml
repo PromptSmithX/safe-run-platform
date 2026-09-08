@@ -61,7 +61,7 @@ paths:
             schema:
               $ref: './schemas/event-envelope.schema.json'
       responses:
-        '200': { description: Accepted; critical events may create/update an incident }
+        '200': { description: Accepted; check-in start/OK are audited without push, while help/timeout and SOS may create one idempotent alert fan-out }
   /v1/run-sessions/{session_id}/end:
     post:
       summary: End session and revoke ingest token

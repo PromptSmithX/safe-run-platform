@@ -12,6 +12,7 @@ struct SafeRunIOSApp: App {
     @StateObject private var mirroring: RemoteWorkoutCoordinator
     @StateObject private var uploader: PhoneUploadController
     @StateObject private var caregiver: CaregiverNotificationController
+    @StateObject private var safetySettings: RunnerSafetySettingsController
 
     init() {
         let support = FileManager.default.urls(
@@ -24,17 +25,20 @@ struct SafeRunIOSApp: App {
         let bridge = PhoneWatchBridge(queue: queue)
         let mirroring = RemoteWorkoutCoordinator()
         let uploader = PhoneUploadController(queue: queue, bridge: bridge)
+        let settingsStore = RunnerSafetyConfigurationStore(fileURL: support.appendingPathComponent("runner-safety-config.json"))
+        let safetySettings = RunnerSafetySettingsController(store: settingsStore, bridge: bridge)
         bridge.activate()
         mirroring.activate()
         _bridge = StateObject(wrappedValue: bridge)
         _mirroring = StateObject(wrappedValue: mirroring)
         _uploader = StateObject(wrappedValue: uploader)
         _caregiver = StateObject(wrappedValue: CaregiverNotificationController())
+        _safetySettings = StateObject(wrappedValue: safetySettings)
     }
 
     var body: some Scene {
         WindowGroup {
-            IOSBootstrapView(bridge: bridge, mirroring: mirroring, uploader: uploader, caregiver: caregiver)
+            IOSBootstrapView(bridge: bridge, mirroring: mirroring, uploader: uploader, caregiver: caregiver, safetySettings: safetySettings)
         }
     }
 }
@@ -53,6 +57,7 @@ private struct IOSBootstrapView: View {
     @ObservedObject var mirroring: RemoteWorkoutCoordinator
     @ObservedObject var uploader: PhoneUploadController
     @ObservedObject var caregiver: CaregiverNotificationController
+    @ObservedObject var safetySettings: RunnerSafetySettingsController
     @AppStorage("SafeRunAppRole") private var role = DeviceRole.runner.rawValue
 
     var body: some View {
@@ -89,6 +94,7 @@ private struct IOSBootstrapView: View {
                         "P0 \(bridge.diagnostics.queueCounts[.critical, default: 0]) / P3 \(bridge.diagnostics.queueCounts[.telemetry, default: 0])"
                     )
                     diagnostic("Last packet", bridge.diagnostics.lastPacketID?.uuidString ?? "none")
+                    diagnostic("Watch config", bridge.diagnostics.lastConfigurationRevision.map { "revision \($0)" } ?? "not sent")
                     if let error = bridge.diagnostics.lastError {
                         diagnostic("Last error", error)
                     }
@@ -117,6 +123,16 @@ private struct IOSBootstrapView: View {
                     Button("Retry now") { uploader.retryNow() }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            GroupBox("Safety check-in") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Configured high-HR check-in", isOn: $safetySettings.enabled)
+                    TextField("Threshold BPM (40–240)", text: $safetySettings.thresholdText).keyboardType(.numberPad).disabled(!safetySettings.enabled)
+                    Text("This controls a communication check-in only. It is not medical advice or a diagnosis.").font(.caption).foregroundStyle(.secondary)
+                    Button("Save and sync to Watch") { Task { await safetySettings.save() } }
+                    diagnostic("Configuration", safetySettings.status)
+                }
             }
             }
         }

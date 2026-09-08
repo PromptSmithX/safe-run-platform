@@ -103,6 +103,27 @@ test("session and telemetry are authenticated and idempotent", async () => {
   });
   assert.equal(registration.status, 200);
 
+  const checkInID = crypto.randomUUID();
+  const uploadCheckIn = async (eventType: string, severity: string, incidentID = checkInID) => fetch(`${apiBase}/v1/run-sessions/${rotated.session_id}/events`, {
+    method: "POST", headers: { authorization: `Bearer ${rotated.ingest_token}`, "content-type": "application/json" },
+    body: JSON.stringify({ schema_version: 1, packet_id: crypto.randomUUID(), session_id: rotated.session_id, seq: 5,
+      watch_timestamp: new Date().toISOString(), kind: "event", payload: {
+        event_id: crypto.randomUUID(), event_type: eventType, severity, incident_id: incidentID,
+        rule_id: "high_hr_sustained_v1",
+      } }),
+  });
+  assert.equal((await uploadCheckIn("check_in_started", "warning")).status, 200);
+  assert.equal((await adminDB.collection("incidents").doc(checkInID).get()).get("status"), "check_in");
+  assert.equal((await adminDB.collection("incidentFanoutMarkers").doc(checkInID).get()).exists, false);
+  assert.equal((await uploadCheckIn("check_in_ok", "info")).status, 200);
+  assert.equal((await adminDB.collection("incidents").doc(checkInID).get()).get("status"), "resolved");
+
+  const reorderedCheckInID = crypto.randomUUID();
+  assert.equal((await uploadCheckIn("check_in_timeout", "critical", reorderedCheckInID)).status, 200);
+  assert.equal((await uploadCheckIn("check_in_started", "warning", reorderedCheckInID)).status, 200);
+  assert.equal((await adminDB.collection("incidents").doc(reorderedCheckInID).get()).get("status"), "alerted");
+  assert.equal((await adminDB.collection("incidentFanoutMarkers").doc(reorderedCheckInID).get()).exists, true);
+
   const eventID = crypto.randomUUID();
   const incidentID = crypto.randomUUID();
   const eventPacketID = crypto.randomUUID();
@@ -118,7 +139,7 @@ test("session and telemetry are authenticated and idempotent", async () => {
   assert.equal((await eventUpload()).status, 200);
   assert.equal((await eventUpload()).status, 200);
   assert.equal((await adminDB.collection("incidents").where("session_id", "==", rotated.session_id).get()).size, 1);
-  assert.equal((await adminDB.collection("incidentFanoutMarkers").get()).size, 1);
+  assert.equal((await adminDB.collection("incidentFanoutMarkers").get()).size, 2);
   const push = await waitFor(async () => {
     const outbox = await adminDB.collection("debugPushOutbox").where("incident_id", "==", incidentID).get();
     return outbox.empty ? undefined : outbox.docs[0]?.data();

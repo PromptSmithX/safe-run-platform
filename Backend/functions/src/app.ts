@@ -135,7 +135,9 @@ async function ingest(request: Request, response: Response, kind: "telemetry" | 
   }
 
   const packetRef = sessionRef.collection("packets").doc(envelope.packet_id);
-  const requestedIncidentID = kind === "event" && envelope.payload.severity === "critical"
+  const eventType = kind === "event" ? String(envelope.payload.event_type) : undefined;
+  const checkInEvent = eventType !== undefined && ["check_in_started", "check_in_ok", "check_in_help_requested", "check_in_timeout"].includes(eventType);
+  const requestedIncidentID = kind === "event" && (envelope.payload.severity === "critical" || checkInEvent)
     ? requireUUID(envelope.payload.incident_id, "incident_id") : undefined;
   const result = await db.runTransaction(async transaction => {
     const [session, packet] = await Promise.all([transaction.get(sessionRef), transaction.get(packetRef)]);
@@ -165,21 +167,32 @@ async function ingest(request: Request, response: Response, kind: "telemetry" | 
     let incident: FirebaseFirestore.DocumentSnapshot | undefined;
     let alertMarker: FirebaseFirestore.DocumentSnapshot | undefined;
     let cancellationMarker: FirebaseFirestore.DocumentSnapshot | undefined;
+    let activeCheckInRef: FirebaseFirestore.DocumentReference | undefined;
+    let activeCheckIn: FirebaseFirestore.DocumentSnapshot | undefined;
+    let resultingIncidentStatus: string | undefined;
     const cancellation = kind === "event" && envelope.payload.event_type === "manual_sos_cancelled";
     if (kind === "event") {
       eventID = requireUUID(envelope.payload.event_id, "event_id");
       eventRef = sessionRef.collection("events").doc(eventID);
       eventExists = (await transaction.get(eventRef)).exists;
-      if (envelope.payload.severity === "critical") {
+      if (envelope.payload.severity === "critical" || checkInEvent) {
         incidentID = requestedIncidentID!;
         incidentRef = db.collection("incidents").doc(incidentID);
         incident = await transaction.get(incidentRef);
         incidentExists = incident.exists;
+        resultingIncidentStatus = incidentExists ? String(incident.get("status")) : undefined;
         alertMarker = await transaction.get(db.collection("incidentFanoutMarkers").doc(incidentID));
         if (cancellation) {
           cancellationMarker = await transaction.get(db.collection("incidentFanoutMarkers").doc(`${incidentID}__cancelled`));
           if (!incidentExists || incident.get("session_id") !== sessionRef.id || incident.get("type") !== "manual_sos") {
             throw new APIError(409, "INCIDENT_NOT_CANCELLABLE", "Manual SOS incident does not match this session");
+          }
+        }
+        if (eventType === "manual_sos" && !incidentExists) {
+          const activeID = session.get("active_incident_id") as string | undefined;
+          if (activeID && activeID !== incidentID) {
+            activeCheckInRef = db.collection("incidents").doc(activeID);
+            activeCheckIn = await transaction.get(activeCheckInRef);
           }
         }
       }
@@ -220,7 +233,38 @@ async function ingest(request: Request, response: Response, kind: "telemetry" | 
         type: envelope.payload.event_type, severity: envelope.payload.severity,
         watch_at: envelope.watch_timestamp, received_at: FieldValue.serverTimestamp(), payload: envelope.payload,
       });
-      if (envelope.payload.severity === "critical") {
+      if (checkInEvent) {
+        const escalation = eventType === "check_in_help_requested" || eventType === "check_in_timeout";
+        if (!incidentExists) {
+          transaction.create(incidentRef!, {
+            session_id: sessionRef.id, family_id: session.get("family_id"), runner_uid: session.get("runner_uid"),
+            type: eventType, severity: escalation ? "critical" : envelope.payload.severity,
+            status: escalation ? "alerted" : eventType === "check_in_started" ? "check_in" : "resolved",
+            created_at: FieldValue.serverTimestamp(), runner_event_at: envelope.watch_timestamp,
+            context: envelope.payload.context ?? null, acknowledged_by: null, acknowledged_at: null,
+            resolution_reason: eventType === "check_in_ok" ? "runner_ok" : null,
+          });
+          if (escalation) transaction.set(db.collection("incidentFanoutMarkers").doc(incidentID!), {
+            incident_id: incidentID, family_id: session.get("family_id"), phase: "alert",
+            status: "pending", created_at: FieldValue.serverTimestamp(),
+          });
+          transaction.update(sessionRef, { active_incident_id: escalation || eventType === "check_in_started" ? incidentID : null });
+          resultingIncidentStatus = escalation ? "alerted" : eventType === "check_in_started" ? "check_in" : "resolved";
+        } else if (incident!.get("session_id") !== sessionRef.id) {
+          throw new APIError(409, "INCIDENT_SESSION_MISMATCH", "Check-in incident does not match this session");
+        } else if (escalation && incident!.get("status") === "check_in") {
+          transaction.update(incidentRef!, { status: "alerted", type: eventType, severity: "critical", context: envelope.payload.context ?? incident!.get("context") });
+          if (!alertMarker?.exists) transaction.create(db.collection("incidentFanoutMarkers").doc(incidentID!), {
+            incident_id: incidentID, family_id: session.get("family_id"), phase: "alert", status: "pending", created_at: FieldValue.serverTimestamp(),
+          });
+          transaction.update(sessionRef, { active_incident_id: incidentID });
+          resultingIncidentStatus = "alerted";
+        } else if (eventType === "check_in_ok" && incident!.get("status") === "check_in") {
+          transaction.update(incidentRef!, { status: "resolved", resolution_reason: "runner_ok", resolved_at: FieldValue.serverTimestamp() });
+          transaction.update(sessionRef, { active_incident_id: null });
+          resultingIncidentStatus = "resolved";
+        }
+      } else if (envelope.payload.severity === "critical") {
         if (cancellation) {
           if (incident!.get("status") !== "cancelled") {
             transaction.update(incidentRef!, {
@@ -228,6 +272,7 @@ async function ingest(request: Request, response: Response, kind: "telemetry" | 
               cancelled_by: "runner", cancellation_event_id: eventID,
             });
             transaction.update(sessionRef, { active_incident_id: null });
+            resultingIncidentStatus = "cancelled";
           }
           if (alertMarker?.exists && alertMarker.get("status") === "pending") {
             transaction.update(alertMarker.ref, { status: "superseded", completed_at: FieldValue.serverTimestamp() });
@@ -238,6 +283,11 @@ async function ingest(request: Request, response: Response, kind: "telemetry" | 
             });
           }
         } else if (!incidentExists) {
+          if (eventType === "manual_sos" && activeCheckInRef && activeCheckIn?.exists && activeCheckIn.get("status") === "check_in") {
+            transaction.update(activeCheckInRef, {
+              status: "resolved", resolution_reason: "superseded_by_manual_sos", resolved_at: FieldValue.serverTimestamp(),
+            });
+          }
           transaction.create(incidentRef!, {
             session_id: sessionRef.id, family_id: session.get("family_id"), runner_uid: session.get("runner_uid"),
             type: envelope.payload.event_type, severity: "critical", status: "alerted",
@@ -249,12 +299,13 @@ async function ingest(request: Request, response: Response, kind: "telemetry" | 
             status: "pending", created_at: FieldValue.serverTimestamp(),
           });
           transaction.update(sessionRef, { active_incident_id: incidentID });
+          resultingIncidentStatus = "alerted";
         }
       }
     }
     return {
       duplicate: false, lastSeq: Math.max(previousSequence, envelope.seq), incidentID,
-      incidentStatus: cancellation ? "cancelled" : incidentID ? String(incident?.get("status") ?? "alerted") : undefined,
+      incidentStatus: incidentID ? resultingIncidentStatus : undefined,
     };
   });
   response.status(200).json({

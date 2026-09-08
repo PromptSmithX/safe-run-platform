@@ -93,7 +93,13 @@ Backend behavior:
 
 Body: event envelope.
 
-For `manual_sos`, `check_in_timeout`, `check_in_help_requested`, backend creates or updates `Incident` and immediately fans out push.
+`check_in_started` creates a `check_in` incident without push, and `check_in_ok`
+resolves that incident without fan-out. `check_in_timeout` and
+`check_in_help_requested` promote the same incident to `alerted` and create one
+logical push fan-out. Because critical P0 packets may overtake lifecycle P1
+packets, an escalation may create the alerted incident before its start event;
+the late start event must never downgrade it. `manual_sos` creates an alerted
+incident and supersedes an active automatic check-in.
 
 `manual_sos_cancelled` is a critical-priority state update with a new `event_id` and the original `incident_id`. It can only cancel a matching manual-SOS incident in the same session. It never creates a new incident; if alert fan-out has already begun, it creates one idempotent cancellation update fan-out.
 

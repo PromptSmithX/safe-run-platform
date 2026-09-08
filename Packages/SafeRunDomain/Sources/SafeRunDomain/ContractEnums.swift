@@ -65,3 +65,7 @@ public enum IncidentStatus: String, Codable, CaseIterable, Equatable, Sendable {
 public enum IncidentAcknowledgementAction: String, Codable, Equatable, Sendable {
     case seen
 }
+
+public enum CheckInReason: String, Codable, Equatable, Sendable {
+    case sustainedHighHeartRate = "sustained_high_heart_rate"
+}
