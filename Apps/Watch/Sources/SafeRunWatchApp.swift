@@ -6,20 +6,37 @@ import SwiftUI
 @MainActor
 struct SafeRunWatchApplication: App {
     @StateObject private var viewModel: RunSessionViewModel
+    @StateObject private var transport: WatchConnectivityTransport
 
     init() {
         let providers = WatchProviderFactory.make()
-        _viewModel = StateObject(
-            wrappedValue: RunSessionViewModel(
-                workoutProvider: providers.workout,
-                locationProvider: providers.location
-            )
+        let viewModel = RunSessionViewModel(
+            workoutProvider: providers.workout,
+            locationProvider: providers.location
         )
+        let support = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first!
+        let queue = WatchRetryQueue(fileURL: support.appendingPathComponent("watch-packets.json"))
+        let sessionStore = LocalRunSessionStore(
+            fileURL: support.appendingPathComponent("active-run.json")
+        )
+        let transport = WatchConnectivityTransport(queue: queue)
+        let coordinator = WatchRunPacketCoordinator(
+            transport: transport,
+            sessionStore: sessionStore,
+            sample: { [weak viewModel] in viewModel?.telemetrySample() }
+        )
+        viewModel.attachPacketCoordinator(coordinator)
+        transport.activate()
+        _viewModel = StateObject(wrappedValue: viewModel)
+        _transport = StateObject(wrappedValue: transport)
     }
 
     var body: some Scene {
         WindowGroup {
-            RunSessionView(viewModel: viewModel)
+            RunSessionView(viewModel: viewModel, transport: transport)
         }
     }
 }
@@ -56,6 +73,7 @@ private enum WatchProviderFactory {
 
 private struct RunSessionView: View {
     @ObservedObject var viewModel: RunSessionViewModel
+    @ObservedObject var transport: WatchConnectivityTransport
 
     var body: some View {
         Group {
@@ -118,6 +136,24 @@ private struct RunSessionView: View {
                 .font(.caption2)
                 .foregroundStyle(locationColor(at: context.date))
 
+                Text(transportStatus)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+
+                if let detail = transportDetail {
+                    Text(detail)
+                        .font(.system(size: 8))
+                        .foregroundStyle(transport.diagnostics.lastError == nil ? .secondary : .orange)
+                        .lineLimit(1)
+                }
+
+                if let sessionID = viewModel.transportSessionID,
+                   let sequence = viewModel.lastPacketSequence {
+                    Text("…\(sessionID.suffix(5)) #\(sequence)")
+                        .font(.system(size: 8))
+                        .foregroundStyle(.secondary)
+                }
+
                 Button("Stop") {
                     Task {
                         await viewModel.stop()
@@ -128,6 +164,21 @@ private struct RunSessionView: View {
                 .accessibilityHint("Stops and saves the current workout")
             }
         }
+    }
+
+    private var transportStatus: String {
+        let connection = transport.diagnostics.isReachable ? "Phone online" : "Phone offline"
+        let critical = transport.diagnostics.queueCounts[.critical, default: 0]
+        let telemetry = transport.diagnostics.queueCounts[.telemetry, default: 0]
+        return "\(connection) • P0 \(critical) • P3 \(telemetry)"
+    }
+
+    private var transportDetail: String? {
+        if let error = transport.diagnostics.lastError { return "Transport: \(error)" }
+        if let id = transport.diagnostics.lastAcknowledgedPacketID {
+            return "ACK …\(id.uuidString.suffix(6))"
+        }
+        return nil
     }
 
     private func progressView(message: String) -> some View {
