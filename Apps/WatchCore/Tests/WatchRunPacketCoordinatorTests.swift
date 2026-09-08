@@ -10,12 +10,11 @@ final class WatchRunPacketCoordinatorTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let transport = RecordingWatchTransport()
+        let persistence = WatchRunPersistence(fileURL: directory.appendingPathComponent("watch-run-v2.json"))
         let now = Date(timeIntervalSince1970: 1_800_000_010)
         let coordinator = WatchRunPacketCoordinator(
             transport: transport,
-            sessionStore: LocalRunSessionStore(
-                fileURL: directory.appendingPathComponent("session.json")
-            ),
+            persistence: persistence,
             telemetryInterval: 3_600,
             now: { now },
             sample: {
@@ -32,9 +31,10 @@ final class WatchRunPacketCoordinatorTests: XCTestCase {
         try await coordinator.sendTelemetry()
         await coordinator.runDidEnd()
 
-        XCTAssertEqual(transport.packets.map(\.sequence), [1, 2, 3])
-        XCTAssertEqual(Set(transport.packets.map(\.sessionID)).count, 1)
-        XCTAssertEqual(transport.packets.map(\.priority), [.lifecycle, .telemetry, .lifecycle])
+        let packets = await persistence.queuedPackets()
+        XCTAssertEqual(packets.map(\.sequence), [1, 2, 3])
+        XCTAssertEqual(Set(packets.map(\.sessionID)).count, 1)
+        XCTAssertEqual(packets.map(\.priority), [.lifecycle, .telemetry, .lifecycle])
     }
 
     func testStaleHeartRateIsOmitted() async throws {
@@ -42,10 +42,11 @@ final class WatchRunPacketCoordinatorTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let transport = RecordingWatchTransport()
+        let persistence = WatchRunPersistence(fileURL: directory.appendingPathComponent("watch-run-v2.json"))
         let now = Date(timeIntervalSince1970: 1_800_000_010)
         let coordinator = WatchRunPacketCoordinator(
             transport: transport,
-            sessionStore: LocalRunSessionStore(fileURL: directory.appendingPathComponent("session.json")),
+            persistence: persistence,
             now: { now },
             sample: {
                 RunTelemetrySample(
@@ -57,8 +58,10 @@ final class WatchRunPacketCoordinatorTests: XCTestCase {
             }
         )
 
+        await coordinator.runDidStart()
         try await coordinator.sendTelemetry()
-        let packet = try XCTUnwrap(transport.packets.last)
+        let queued = await persistence.queuedPackets()
+        let packet = try XCTUnwrap(queued.last)
         let envelope = try SafeRunJSON.makeDecoder().decode(
             TelemetryEnvelope.self,
             from: packet.envelopeData
@@ -72,6 +75,7 @@ final class WatchRunPacketCoordinatorTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let transport = RecordingWatchTransport()
+        let persistence = WatchRunPersistence(fileURL: directory.appendingPathComponent("watch-run-v2.json"))
         let now = Date(timeIntervalSince1970: 1_800_000_010)
         let identifiers = [
             UUID(uuidString: "11111111-1111-4111-8111-111111111111")!,
@@ -81,7 +85,7 @@ final class WatchRunPacketCoordinatorTests: XCTestCase {
         var index = 0
         let coordinator = WatchRunPacketCoordinator(
             transport: transport,
-            sessionStore: LocalRunSessionStore(fileURL: directory.appendingPathComponent("session.json")),
+            persistence: persistence,
             now: { now },
             makeUUID: { defer { index += 1 }; return identifiers[index] },
             sample: {
@@ -96,13 +100,15 @@ final class WatchRunPacketCoordinatorTests: XCTestCase {
             }
         )
 
+        await coordinator.runDidStart()
         let sos = try await coordinator.queueManualSOS()
         let cancellation = try await coordinator.queueManualSOSCancellation(incidentID: sos.incidentID)
 
-        XCTAssertEqual(transport.packets.map(\.priority), [.critical, .critical])
-        XCTAssertEqual(transport.packets.map(\.sequence), [1, 2])
-        let first = try SafeRunJSON.makeDecoder().decode(EventEnvelope.self, from: transport.packets[0].envelopeData)
-        let second = try SafeRunJSON.makeDecoder().decode(EventEnvelope.self, from: transport.packets[1].envelopeData)
+        let packets = await persistence.queuedPackets()
+        XCTAssertEqual(packets.map(\.priority), [.lifecycle, .critical, .critical])
+        XCTAssertEqual(packets.map(\.sequence), [1, 2, 3])
+        let first = try SafeRunJSON.makeDecoder().decode(EventEnvelope.self, from: packets[1].envelopeData)
+        let second = try SafeRunJSON.makeDecoder().decode(EventEnvelope.self, from: packets[2].envelopeData)
         XCTAssertEqual(first.payload.eventType, .manualSOS)
         XCTAssertEqual(second.payload.eventType, .manualSOSCancelled)
         XCTAssertEqual(first.payload.incidentID, second.payload.incidentID)
@@ -115,8 +121,6 @@ final class WatchRunPacketCoordinatorTests: XCTestCase {
 @MainActor
 private final class RecordingWatchTransport: WatchTransporting {
     var diagnostics = WatchTransportDiagnostics(isReachable: true)
-    var packets: [TransportPacket] = []
-
     func activate() {}
-    func enqueue(_ packet: TransportPacket) async throws { packets.append(packet) }
+    func outboxDidChange() async {}
 }

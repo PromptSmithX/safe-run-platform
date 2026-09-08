@@ -82,6 +82,17 @@ test("session and telemetry are authenticated and idempotent", async () => {
   const adminDB = getFirestore();
   assert.equal((await adminDB.collection("runSessions").doc(rotated.session_id).get()).get("last_seq"), 4);
 
+  const connectionIncidentID = crypto.randomUUID();
+  await Promise.all([
+    adminDB.collection("runSessions").doc(rotated.session_id).update({ connection_state: "stale", connection_incident_id: connectionIncidentID }),
+    adminDB.collection("incidents").doc(connectionIncidentID).set({ session_id: rotated.session_id, family_id: user.localId, runner_uid: user.localId, type: "connection_degraded", severity: "warning", status: "alerted", created_at: new Date() }),
+    adminDB.collection("incidentFanoutMarkers").doc(`${connectionIncidentID}__alert`).set({ incident_id: connectionIncidentID, family_id: user.localId, phase: "alert", status: "pending", created_at: new Date() }),
+  ]);
+  envelope.packet_id = crypto.randomUUID(); envelope.seq = 5;
+  assert.equal((await upload()).status, 200);
+  assert.equal((await adminDB.collection("runSessions").doc(rotated.session_id).get()).get("connection_state"), "healthy");
+  assert.equal((await adminDB.collection("incidents").doc(connectionIncidentID).get()).get("status"), "resolved");
+
   const caregiver = await anonymousUser();
   await Promise.all([
     adminDB.collection("users").doc(user.localId).set({ phone_e164: "+84901234567" }, { merge: true }),
@@ -114,7 +125,7 @@ test("session and telemetry are authenticated and idempotent", async () => {
   });
   assert.equal((await uploadCheckIn("check_in_started", "warning")).status, 200);
   assert.equal((await adminDB.collection("incidents").doc(checkInID).get()).get("status"), "check_in");
-  assert.equal((await adminDB.collection("incidentFanoutMarkers").doc(checkInID).get()).exists, false);
+  assert.equal((await adminDB.collection("incidentFanoutMarkers").doc(`${checkInID}__alert`).get()).exists, false);
   assert.equal((await uploadCheckIn("check_in_ok", "info")).status, 200);
   assert.equal((await adminDB.collection("incidents").doc(checkInID).get()).get("status"), "resolved");
 
@@ -122,7 +133,7 @@ test("session and telemetry are authenticated and idempotent", async () => {
   assert.equal((await uploadCheckIn("check_in_timeout", "critical", reorderedCheckInID)).status, 200);
   assert.equal((await uploadCheckIn("check_in_started", "warning", reorderedCheckInID)).status, 200);
   assert.equal((await adminDB.collection("incidents").doc(reorderedCheckInID).get()).get("status"), "alerted");
-  assert.equal((await adminDB.collection("incidentFanoutMarkers").doc(reorderedCheckInID).get()).exists, true);
+  assert.equal((await adminDB.collection("incidentFanoutMarkers").doc(`${reorderedCheckInID}__alert`).get()).exists, true);
 
   const eventID = crypto.randomUUID();
   const incidentID = crypto.randomUUID();

@@ -15,16 +15,16 @@ backend, từ đó hỗ trợ người thân nhận thông báo khi cần.
 | --- | --- | --- |
 | M0 | Bootstrap workspace, targets và domain contracts | `blocked` |
 | A | Local Apple Watch workout prototype | `blocked` |
-| B | Watch-to-iPhone transport | `not_started` |
-| C | Firebase ingestion và iPhone uploader | `not_started` |
-| D | Manual SOS và caregiver push | `not_started` |
-| E | Check-in và rule sustained heart rate | `not_started` |
-| F | Recovery, monitoring và beta hardening | `not_started` |
+| B | Watch-to-iPhone transport | `blocked` |
+| C | Firebase ingestion và iPhone uploader | `blocked` |
+| D | Manual SOS và caregiver push | `blocked` |
+| E | Check-in và rule sustained heart rate | `blocked` |
+| F | Recovery, monitoring và beta hardening | `blocked` |
 
-M0 và A đã có source scaffold/prototype, nhưng chưa được xác minh bằng Xcode,
-unit test, simulator build và thiết bị Apple thật. Exact next action hiện tại là
-chạy `bash Scripts/verify-a.sh` trên macOS, sau đó thực hiện bài test Apple Watch
-liên tục tối thiểu 60 phút.
+M0–F đã có source theo chế độ triển khai at-risk, nhưng chưa được xác minh đầy
+đủ bằng Firebase Emulator, Xcode, staging/APNs/FCM và thiết bị Apple thật. Exact
+next action là chạy `bash Scripts/verify-f.sh` trên macOS, sửa mọi lỗi, rồi hoàn
+thành ma trận staging/TestFlight/device trong beta runbook.
 
 ## Kiến trúc MVP
 
@@ -55,18 +55,20 @@ thuộc Phase 2 hoặc ngoài MVP hiện tại.
 - Fake workout/location providers cho simulator và test.
 - `RunSessionViewModel` với trạng thái idle, preparing, active, ending, ended
   và failed.
-- Unit tests cho domain contracts, location quality policy, fake providers và
-  run-session flow.
+- Một Watch persistence v2 duy nhất cho sequence, durable outbox, check-in và
+  crash recovery; migration từ hai file v1 được giữ an toàn.
+- iPhone SQLite gateway v3, restart reconciliation, payload scrubbing,
+  tombstones và một recovery/upload orchestrator.
+- Firebase ingestion, SOS/check-in incident fan-out, dead-man monitor,
+  retention sweep, TTL/index configuration và privacy-safe logging.
+- Unit tests và source verification cho domain, Watch/iPhone core và backend.
 
-## Chưa triển khai
+## Chưa xác minh
 
-- WatchConnectivity transport, durable queues, ACK semantics và workout
-  mirroring.
-- Firebase authentication, session API, ingestion API và iPhone uploader.
-- Manual SOS end-to-end, caregiver registration, push notification và incident
-  detail.
-- Check-in coordinator, automatic safety rules, cooldown và escalation.
-- Recovery/dead-man monitoring, privacy hardening và beta validation.
+- Firebase Emulator integration/rules, scheduled monitor và TTL deployment.
+- Swift compilation/tests và simulator builds với toolchain Apple.
+- HealthKit crash recovery, background transport và queue reconciliation trên thiết bị thật.
+- APNs/FCM staging cùng toàn bộ ma trận beta 60/120 phút và 20 SOS.
 
 ## Yêu cầu môi trường
 
@@ -80,6 +82,10 @@ thuộc Phase 2 hoặc ngoài MVP hiện tại.
 
 Workspace Windows hiện tại chỉ phù hợp để đọc/sửa source và tài liệu. Không thể
 chạy Xcode build hoặc xác nhận hành vi trên thiết bị Apple từ Windows.
+
+Kiểm tra phần source/backend có thể chạy bằng `powershell -File
+Scripts/verify-f-source.ps1`. Full Firebase Emulator verification trên Windows
+cần Node 22 và Java.
 
 ## Bắt đầu nhanh trên macOS
 

@@ -2,6 +2,7 @@ import { getMessaging } from "firebase-admin/messaging";
 import { FieldValue, Timestamp, getFirestore } from "firebase-admin/firestore";
 import { onDocumentCreated } from "firebase-functions/v2/firestore";
 import { DeviceRepository } from "./devices";
+import { retention } from "./privacy";
 
 const db = getFirestore();
 const leaseMillis = 60_000;
@@ -51,6 +52,7 @@ class EmulatorPushSender implements PushSending {
       body: payload.body,
       fcm_message_id: messageID,
       created_at: FieldValue.serverTimestamp(),
+      expire_at: Timestamp.fromMillis(Date.now() + retention.debugOutboxMillis),
     });
     return messageID;
   }
@@ -120,6 +122,7 @@ export async function processFanoutMarker(markerID: string, sender: PushSending 
       await attemptRef.set({
         device_id: target.deviceID, caregiver_uid: target.uid, phase, status: "sending",
         updated_at: FieldValue.serverTimestamp(),
+        expire_at: Timestamp.fromMillis(Date.now() + retention.operationalMillis),
       }, { merge: true });
       const messageID = await sender.send(target.token, target.deviceID, payload);
       await attemptRef.set({

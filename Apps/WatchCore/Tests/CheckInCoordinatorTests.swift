@@ -6,8 +6,13 @@ import XCTest
 @MainActor
 private final class CheckInDispatcherSpy: CheckInEventDispatching {
     var events: [(SafetyEventType, IncidentSeverity, UUID)] = []
-    func queueCheckInEvent(_ type: SafetyEventType, severity: IncidentSeverity, incidentID: UUID, evaluation: RuleEvaluationSnapshot?) async throws {
-        events.append((type, severity, incidentID))
+    private var incidentID: UUID?
+    func startPersistentCheckIn(_ snapshot: PersistentCheckInSnapshot, evaluation: RuleEvaluationSnapshot, at date: Date) async throws {
+        incidentID = snapshot.incidentID
+        events.append((.checkInStarted, .warning, snapshot.incidentID))
+    }
+    func resolvePersistentCheckIn(_ type: SafetyEventType, severity: IncidentSeverity, eventID: UUID, at date: Date) async throws {
+        events.append((type, severity, incidentID!))
     }
 }
 
@@ -33,5 +38,14 @@ final class CheckInCoordinatorTests: XCTestCase {
         await tested.tick(at: start.addingTimeInterval(20))
         await tested.userRequestsHelp()
         XCTAssertEqual(spy.events.filter { $0.1 == .critical }.count, 1)
+    }
+
+    func testRestoreAfterDeadlineQueuesOneTimeoutWithoutRestartEvent() async {
+        let spy = CheckInDispatcherSpy(); let deadline = Date(timeIntervalSince1970: 100)
+        let coordinator = CheckInCoordinator(dispatcher: spy, now: { deadline })
+        let snapshot = PersistentCheckInSnapshot(incidentID: UUID(), startedEventID: UUID(), deadline: deadline, context: EventContext(ruleEvaluation: evidence))
+        await coordinator.restore(snapshot, at: deadline)
+        await coordinator.tick(at: deadline.addingTimeInterval(1))
+        XCTAssertEqual(spy.events.map(\.0), [.checkInTimeout])
     }
 }

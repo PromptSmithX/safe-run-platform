@@ -25,6 +25,7 @@ struct SafeRunIOSApp: App {
         let bridge = PhoneWatchBridge(queue: queue)
         let mirroring = RemoteWorkoutCoordinator()
         let uploader = PhoneUploadController(queue: queue, bridge: bridge)
+        uploader.attachMirroring(mirroring)
         let settingsStore = RunnerSafetyConfigurationStore(fileURL: support.appendingPathComponent("runner-safety-config.json"))
         let safetySettings = RunnerSafetySettingsController(store: settingsStore, bridge: bridge)
         bridge.activate()
@@ -59,6 +60,7 @@ private struct IOSBootstrapView: View {
     @ObservedObject var caregiver: CaregiverNotificationController
     @ObservedObject var safetySettings: RunnerSafetySettingsController
     @AppStorage("SafeRunAppRole") private var role = DeviceRole.runner.rawValue
+    @State private var supportBundle: SupportBundleItem?
 
     var body: some View {
         NavigationStack {
@@ -121,6 +123,7 @@ private struct IOSBootstrapView: View {
                     diagnostic("Terminal", "\(uploader.diagnostics.terminalCount)")
                     if let error = uploader.diagnostics.lastErrorCode { diagnostic("Upload error", error) }
                     Button("Retry now") { uploader.retryNow() }
+                    Button("Export support diagnostics") { createSupportBundle() }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -142,7 +145,16 @@ private struct IOSBootstrapView: View {
         }
         .task { caregiver.setRole(role) }
         .onChange(of: role) { _, newRole in caregiver.setRole(newRole) }
+        .sheet(item: $supportBundle) { item in
+            ActivityShareView(url: item.url) { SupportDiagnosticsExporter.remove(item.url); supportBundle = nil }
         }
+        }
+    }
+
+    private func createSupportBundle() {
+        let errors = [bridge.diagnostics.lastError, uploader.diagnostics.lastErrorCode, mirroring.lastError].compactMap { $0 }
+        let snapshot = SupportDiagnosticSnapshot(appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown", queueDepth: bridge.diagnostics.queueDepth, retryCount: uploader.diagnostics.attemptCount, errorCodes: errors)
+        if let url = try? SupportDiagnosticsExporter.create(snapshot) { supportBundle = SupportBundleItem(url: url) }
     }
 
     private var caregiverView: some View {
@@ -170,6 +182,19 @@ private struct IOSBootstrapView: View {
         }
         .font(.caption)
     }
+}
+
+private struct SupportBundleItem: Identifiable { let id = UUID(); let url: URL }
+
+private struct ActivityShareView: UIViewControllerRepresentable {
+    let url: URL
+    let completed: () -> Void
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let controller = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        controller.completionWithItemsHandler = { _, _, _, _ in completed() }
+        return controller
+    }
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
 private struct IncidentDetailView: View {

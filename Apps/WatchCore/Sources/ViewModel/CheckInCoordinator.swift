@@ -10,7 +10,8 @@ public enum CheckInState: Equatable, Sendable { case idle, active(CheckInContext
 public enum CheckInResolution: Equatable, Sendable { case ok, help, timeout, superseded }
 
 @MainActor public protocol CheckInEventDispatching: AnyObject {
-    func queueCheckInEvent(_ type: SafetyEventType, severity: IncidentSeverity, incidentID: UUID, evaluation: RuleEvaluationSnapshot?) async throws
+    func startPersistentCheckIn(_ snapshot: PersistentCheckInSnapshot, evaluation: RuleEvaluationSnapshot, at date: Date) async throws
+    func resolvePersistentCheckIn(_ type: SafetyEventType, severity: IncidentSeverity, eventID: UUID, at date: Date) async throws
 }
 
 @MainActor
@@ -19,13 +20,15 @@ public final class CheckInCoordinator: ObservableObject {
     public var onResolved: ((CheckInResolution) -> Void)?
     private let dispatcher: any CheckInEventDispatching
     private let makeUUID: () -> UUID
-    public init(dispatcher: any CheckInEventDispatching, makeUUID: @escaping () -> UUID = UUID.init) { self.dispatcher = dispatcher; self.makeUUID = makeUUID }
+    private let now: () -> Date
+    public init(dispatcher: any CheckInEventDispatching, makeUUID: @escaping () -> UUID = UUID.init, now: @escaping () -> Date = Date.init) { self.dispatcher = dispatcher; self.makeUUID = makeUUID; self.now = now }
 
     public func startCheckIn(reason: CheckInReason, evaluation: RuleEvaluationSnapshot, timeoutSeconds: Int, at date: Date) async {
         guard state == .idle || state == .resolved || state == .escalated else { return }
         let context = CheckInContext(incidentID: makeUUID(), reason: reason, startedAt: date, deadline: date.addingTimeInterval(TimeInterval(timeoutSeconds)), evidence: evaluation)
         state = .active(context)
-        do { try await dispatcher.queueCheckInEvent(.checkInStarted, severity: .warning, incidentID: context.incidentID, evaluation: evaluation) }
+        let snapshot = PersistentCheckInSnapshot(incidentID: context.incidentID, startedEventID: makeUUID(), deadline: context.deadline, context: EventContext(ruleEvaluation: evaluation))
+        do { try await dispatcher.startPersistentCheckIn(snapshot, evaluation: evaluation, at: date) }
         catch { state = .idle }
     }
     public func userOK() async { await resolve(.ok) }
@@ -34,12 +37,22 @@ public final class CheckInCoordinator: ObservableObject {
     public func supersedeWithManualSOS() { guard case .active = state else { return }; state = .resolved; onResolved?(.superseded) }
     public func resetForRun() { state = .idle }
 
+    public func restore(_ snapshot: PersistentCheckInSnapshot, at date: Date) async {
+        guard snapshot.terminalOutcome == nil, state == .idle || state == .resolved || state == .escalated else { return }
+        let evidence = snapshot.context?.ruleEvaluation ?? RuleEvaluationSnapshot(
+            thresholdBPM: 0, windowSeconds: 0, sampleCount: 0, minimumBPM: 0, maximumBPM: 0, averageBPM: 0
+        )
+        let context = CheckInContext(incidentID: snapshot.incidentID, reason: .sustainedHighHeartRate, startedAt: snapshot.deadline.addingTimeInterval(-20), deadline: snapshot.deadline, evidence: evidence)
+        state = .active(context)
+        if date >= snapshot.deadline { await resolve(.timeout) }
+    }
+
     private func resolve(_ resolution: CheckInResolution) async {
         guard case .active(let context) = state else { return }
         state = .resolving
         let event: (SafetyEventType, IncidentSeverity) = resolution == .ok ? (.checkInOK, .info) : (resolution == .help ? .checkInHelpRequested : .checkInTimeout, .critical)
         do {
-            try await dispatcher.queueCheckInEvent(event.0, severity: event.1, incidentID: context.incidentID, evaluation: context.evidence)
+            try await dispatcher.resolvePersistentCheckIn(event.0, severity: event.1, eventID: makeUUID(), at: now())
             state = resolution == .ok ? .resolved : .escalated; onResolved?(resolution)
         } catch { state = .active(context) }
     }

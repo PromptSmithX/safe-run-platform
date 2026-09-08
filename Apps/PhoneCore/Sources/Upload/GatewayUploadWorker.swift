@@ -150,7 +150,7 @@ public actor GatewayUploadWorker {
             serverSessionID: response.sessionID,
             credentialAccount: account,
             expiresAt: response.expiresAt,
-            state: "active",
+            state: .active,
             lastSequence: 0
         )
         try await queue.saveBinding(binding)

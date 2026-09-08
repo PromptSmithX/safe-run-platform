@@ -34,7 +34,7 @@ public struct WatchTransportDiagnostics: Equatable, Sendable {
 public protocol WatchTransporting: AnyObject {
     var diagnostics: WatchTransportDiagnostics { get }
     func activate()
-    func enqueue(_ packet: TransportPacket) async throws
+    func outboxDidChange() async
 }
 
 @MainActor
@@ -75,22 +75,25 @@ public final class WatchConnectivityTransport: NSObject, ObservableObject, Watch
     public var onSafetyConfiguration: ((RunnerSafetyConfigurationEnvelope) -> Void)?
 
     private let session: any WatchMessageSession
-    private let queue: WatchRetryQueue
+    private let persistence: WatchRunPersistence
     private let acknowledgementTimeout: TimeInterval
     private let configurationStore: WatchSafetyConfigStore?
+    private let chaos: DebugChaosConfiguration
     private var inFlightPacketID: UUID?
     private var timeoutTask: Task<Void, Never>?
 
     public init(
-        queue: WatchRetryQueue,
+        persistence: WatchRunPersistence,
         session: any WatchMessageSession = SystemWatchMessageSession(),
         acknowledgementTimeout: TimeInterval = 15,
-        configurationStore: WatchSafetyConfigStore? = nil
+        configurationStore: WatchSafetyConfigStore? = nil,
+        chaos: DebugChaosConfiguration = .current()
     ) {
-        self.queue = queue
+        self.persistence = persistence
         self.session = session
         self.acknowledgementTimeout = acknowledgementTimeout
         self.configurationStore = configurationStore
+        self.chaos = chaos
         super.init()
     }
 
@@ -100,20 +103,19 @@ public final class WatchConnectivityTransport: NSObject, ObservableObject, Watch
         Task { await refreshQueueAndDrain() }
     }
 
-    public func enqueue(_ packet: TransportPacket) async throws {
-        _ = try await queue.enqueue(packet)
+    public func outboxDidChange() async {
         await refreshQueueAndDrain()
     }
 
     private func refreshQueueAndDrain() async {
-        let snapshot = await queue.snapshot()
+        let snapshot = await persistence.snapshot()
         diagnostics.queueDepth = snapshot.totalCount
         diagnostics.queueCounts = snapshot.counts
         if let error = snapshot.storageError { diagnostics.lastError = error }
         guard inFlightPacketID == nil,
               session.activationState == .activated,
-              session.isReachable,
-              let packet = await queue.next() else { return }
+              session.isReachable, !chaos.watchUnreachable,
+              let packet = await persistence.nextPacket(reorderTelemetry: chaos.reorderTelemetry) else { return }
         send(packet)
     }
 
@@ -146,7 +148,7 @@ public final class WatchConnectivityTransport: NSObject, ObservableObject, Watch
                 failInFlight(acknowledgement.errorCode ?? "invalid_acknowledgement")
                 return
             }
-            _ = try await queue.acknowledge(packetID: packetID)
+            try await persistence.acknowledge(packetID: packetID)
             timeoutTask?.cancel()
             inFlightPacketID = nil
             diagnostics.lastAcknowledgedPacketID = packetID
@@ -170,7 +172,7 @@ public final class WatchConnectivityTransport: NSObject, ObservableObject, Watch
 
     private func refreshConnectionDiagnostics() {
         diagnostics.activationState = String(describing: session.activationState)
-        diagnostics.isReachable = session.isReachable
+        diagnostics.isReachable = session.isReachable && !chaos.watchUnreachable
     }
 }
 

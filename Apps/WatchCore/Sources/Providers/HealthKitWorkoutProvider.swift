@@ -87,6 +87,27 @@ public final class HealthKitWorkoutProvider: NSObject, WorkoutDataProviding {
         }
     }
 
+    public func recoverWorkout() async throws -> WorkoutSnapshot? {
+        let recovered: HKWorkoutSession? = try await withCheckedThrowingContinuation { continuation in
+            healthStore.recoverActiveWorkoutSession { session, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: session) }
+            }
+        }
+        guard let recovered else { return nil }
+        let builder = recovered.associatedWorkoutBuilder()
+        builder.dataSource = HKLiveWorkoutDataSource(healthStore: healthStore, workoutConfiguration: recovered.workoutConfiguration)
+        recovered.delegate = self; builder.delegate = self
+        session = recovered; self.builder = builder
+        startedAt = recovered.startDate
+        recovered.startMirroringToCompanionDevice { [weak self] success, error in
+            if !success { Task { @MainActor in self?.onMirroringError?(error?.localizedDescription ?? "Workout mirroring recovery unavailable.") } }
+        }
+        let state: RunState = recovered.state == .paused ? .paused : .active
+        let snapshot = WorkoutSnapshot(state: state, startedAt: startedAt, heartRateBPM: latestHeartRateBPM, heartRateSampleDate: latestHeartRateDate)
+        onSnapshot?(snapshot)
+        return snapshot
+    }
+
     public func stopWorkout(at date: Date) async throws -> WorkoutSummary {
         guard let session, let builder, let startedAt else {
             throw WorkoutProviderError.noActiveWorkout

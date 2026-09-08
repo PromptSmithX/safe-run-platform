@@ -6,7 +6,12 @@ public protocol WorkoutDataProviding: AnyObject {
 
     func requestAuthorization() async throws
     func startWorkout(at date: Date) async throws
+    func recoverWorkout() async throws -> WorkoutSnapshot?
     func stopWorkout(at date: Date) async throws -> WorkoutSummary
+}
+
+public extension WorkoutDataProviding {
+    func recoverWorkout() async throws -> WorkoutSnapshot? { nil }
 }
 
 @MainActor
@@ -17,4 +22,3 @@ public protocol LocationDataProviding: AnyObject {
     func startUpdatingLocation()
     func stopUpdatingLocation()
 }
-

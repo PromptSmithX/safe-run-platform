@@ -10,6 +10,7 @@ final class PhoneUploadController: ObservableObject {
     @Published private(set) var configurationStatus = "initializing"
 
     private var worker: GatewayUploadWorker?
+    private var recovery: PhoneRecoveryCoordinator?
     private let pathMonitor = NWPathMonitor()
     private let monitorQueue = DispatchQueue(label: "com.saferun.network-monitor")
 
@@ -21,19 +22,24 @@ final class PhoneUploadController: ObservableObject {
         do {
             let baseURL = try FirebaseBootstrap.configure()
             let injection = Self.failureInjection()
+            let auth = FirebaseRunnerAuthProvider()
+            let credentials = KeychainIngestCredentialStore()
+            let api = SafeRunAPIClient(baseURL: baseURL, injection: injection)
             let worker = GatewayUploadWorker(
                 queue: queue,
-                api: SafeRunAPIClient(baseURL: baseURL, injection: injection),
-                auth: FirebaseRunnerAuthProvider(),
-                credentials: KeychainIngestCredentialStore()
+                api: api,
+                auth: auth,
+                credentials: credentials
             )
+            let recovery = PhoneRecoveryCoordinator(reconciler: PhoneSessionReconciler(queue: queue, api: api, auth: auth, credentials: credentials), worker: worker)
             self.worker = worker
+            self.recovery = recovery
             configurationStatus = FirebaseBootstrap.usesEmulator ? "anonymous auth • emulator" : "anonymous auth • configured"
             Task {
                 await worker.setDiagnosticsHandler { [weak self] snapshot in
                     Task { @MainActor in self?.diagnostics = snapshot }
                 }
-                await worker.trigger()
+                await recovery.wake()
             }
             bridge.onPacketAccepted = { [weak self] _ in self?.drainWithBackgroundTime() }
             pathMonitor.pathUpdateHandler = { [weak self] path in
@@ -50,15 +56,19 @@ final class PhoneUploadController: ObservableObject {
 
     func retryNow() { drainWithBackgroundTime() }
 
+    func attachMirroring(_ mirroring: RemoteWorkoutCoordinator) {
+        mirroring.onSessionChanged = { [weak self] in self?.drainWithBackgroundTime() }
+    }
+
     private func drainWithBackgroundTime() {
-        guard let worker else { return }
+        guard let recovery else { return }
         var taskID: UIBackgroundTaskIdentifier = .invalid
         taskID = UIApplication.shared.beginBackgroundTask(withName: "SafeRunUpload") {
             if taskID != .invalid { UIApplication.shared.endBackgroundTask(taskID) }
             taskID = .invalid
         }
         Task {
-            await worker.trigger()
+            await recovery.wake()
             if taskID != .invalid { UIApplication.shared.endBackgroundTask(taskID) }
             taskID = .invalid
         }

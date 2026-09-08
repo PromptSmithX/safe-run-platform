@@ -76,6 +76,9 @@ private actor FakeAPI: SafeRunAPIClientProtocol {
         return try SafeRunJSON.makeDecoder().decode(IngestResponse.self, from: Data("{\"accepted\":true}".utf8))
     }
     func endSession(serverSessionID: String, ingestToken: String, request: EndRunSessionRequest) async throws {}
+    func reconcileSessions(_ request: SessionReconciliationRequest, userToken: String) async throws -> SessionReconciliationResponse {
+        SessionReconciliationResponse(sessions: [])
+    }
 }
 
 private struct FakeAuth: UserIDTokenProviding {

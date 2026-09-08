@@ -132,6 +132,15 @@ Never call a field `af_detected` unless a future validated medical algorithm and
 }
 ```
 
+`status` is `active`, `ended`, or `abandoned`. Connection monitoring is tracked
+independently with `connection_state`, `connection_incident_id`, and
+`connection_stale_since`; it must never replace `active_incident_id`.
+
+Retention uses server-owned `expire_at` timestamps: telemetry samples 72 hours,
+events/incident context 90 days, operational packet/fan-out metadata 30 days,
+and emulator push outbox 24 hours. Unresolved critical incident metadata is not
+TTL-deleted.
+
 ## 6. Incident document
 
 ```json

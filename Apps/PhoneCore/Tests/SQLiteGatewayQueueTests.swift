@@ -68,6 +68,8 @@ final class SQLiteGatewayQueueTests: XCTestCase {
         let claim = try XCTUnwrap(initialClaim)
         let leasedClaim = try await queue.claimNext(now: Date(timeIntervalSince1970: 101))
         XCTAssertNil(leasedClaim)
+        let expiredLeaseClaim = try await queue.claimNext(now: Date(timeIntervalSince1970: 131))
+        XCTAssertNotNil(expiredLeaseClaim)
         try await queue.scheduleRetry(localID: claim.localID, attemptCount: 1, nextAttemptAt: Date(timeIntervalSince1970: 200))
         let earlyClaim = try await queue.claimNext(now: Date(timeIntervalSince1970: 199))
         XCTAssertNil(earlyClaim)
@@ -78,7 +80,7 @@ final class SQLiteGatewayQueueTests: XCTestCase {
         let binding = SessionBinding(
             localSessionID: "session", serverSessionID: UUID().uuidString,
             credentialAccount: "session.session", expiresAt: Date(timeIntervalSince1970: 500),
-            state: "active", lastSequence: 1
+            state: .active, lastSequence: 1
         )
         try await queue.saveBinding(binding)
         let restored = try SQLiteGatewayQueue(databaseURL: url)
@@ -86,6 +88,20 @@ final class SQLiteGatewayQueueTests: XCTestCase {
         let summary = try await restored.pendingSummary()
         XCTAssertEqual(restoredBinding?.serverSessionID, binding.serverSessionID)
         XCTAssertEqual(summary.terminal, 1)
+    }
+
+    func testUploadedPayloadIsScrubbedButTombstoneStillDeduplicates() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let queue = try SQLiteGatewayQueue(databaseURL: directory.appendingPathComponent("gateway.sqlite"))
+        let packet = try makePacket(sequence: 1)
+        try await queue.accept(packet)
+        let pendingClaim = try await queue.claimNext()
+        let claim = try XCTUnwrap(pendingClaim)
+        try await queue.markUploaded(localID: claim.localID, at: Date(timeIntervalSince1970: 100))
+        let tombstone = try await queue.tombstone(packetID: packet.packetID)
+        XCTAssertTrue(tombstone.exists); XCTAssertEqual(tombstone.payloadBytes, 0)
+        let duplicate = try await queue.accept(packet)
+        XCTAssertEqual(duplicate, .duplicate)
     }
 
     private func makePacket(sequence: Int, critical: Bool = false) throws -> TransportPacket {
