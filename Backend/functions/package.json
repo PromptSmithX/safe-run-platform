@@ -8,7 +8,8 @@
     "build": "npm run copy-schemas && tsc",
     "typecheck": "npm run copy-schemas && tsc --noEmit",
     "test": "npm run build && node --test lib/tests/unit/*.test.js",
-    "test:emulator": "npm run build && node --test lib/tests/emulator/*.test.js"
+    "test:emulator": "npm run build && node --test lib/tests/emulator/*.test.js",
+    "seed:caregiver": "node scripts/seed-emulator-caregiver.mjs"
   },
   "dependencies": {
     "ajv": "8.20.0",

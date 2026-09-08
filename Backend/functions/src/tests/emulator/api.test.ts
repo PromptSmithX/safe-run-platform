@@ -18,6 +18,16 @@ async function anonymousUser(): Promise<{ idToken: string; localId: string }> {
   return await response.json() as { idToken: string; localId: string };
 }
 
+async function waitFor<T>(load: () => Promise<T | undefined>, timeoutMillis = 8_000): Promise<T> {
+  const deadline = Date.now() + timeoutMillis;
+  while (Date.now() < deadline) {
+    const value = await load();
+    if (value !== undefined) return value;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error("Timed out waiting for emulator side effect");
+}
+
 test("session and telemetry are authenticated and idempotent", async () => {
   await fetch(`http://127.0.0.1:8080/emulator/v1/projects/${projectID}/databases/(default)/documents`, { method: "DELETE" });
   const unauthorized = await fetch(`${apiBase}/v1/run-sessions`, {
@@ -72,6 +82,48 @@ test("session and telemetry are authenticated and idempotent", async () => {
   const adminDB = getFirestore();
   assert.equal((await adminDB.collection("runSessions").doc(rotated.session_id).get()).get("last_seq"), 4);
 
+  const caregiver = await anonymousUser();
+  await Promise.all([
+    adminDB.collection("users").doc(user.localId).set({ phone_e164: "+84901234567" }, { merge: true }),
+    adminDB.collection("users").doc(caregiver.localId).set({
+      display_name: "Caregiver", default_family_id: user.localId,
+    }, { merge: true }),
+    adminDB.collection("families").doc(user.localId).collection("members").doc(caregiver.localId).set({
+      role: "caregiver", status: "active",
+    }),
+  ]);
+  const caregiverDeviceID = crypto.randomUUID();
+  const registration = await fetch(`${apiBase}/v1/devices`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${caregiver.idToken}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      device_id: caregiverDeviceID, platform: "ios", role: "caregiver",
+      fcm_token: "fake-emulator-token", app_version: "0.1.0",
+    }),
+  });
+  assert.equal(registration.status, 200);
+
+  const checkInID = crypto.randomUUID();
+  const uploadCheckIn = async (eventType: string, severity: string, incidentID = checkInID) => fetch(`${apiBase}/v1/run-sessions/${rotated.session_id}/events`, {
+    method: "POST", headers: { authorization: `Bearer ${rotated.ingest_token}`, "content-type": "application/json" },
+    body: JSON.stringify({ schema_version: 1, packet_id: crypto.randomUUID(), session_id: rotated.session_id, seq: 5,
+      watch_timestamp: new Date().toISOString(), kind: "event", payload: {
+        event_id: crypto.randomUUID(), event_type: eventType, severity, incident_id: incidentID,
+        rule_id: "high_hr_sustained_v1",
+      } }),
+  });
+  assert.equal((await uploadCheckIn("check_in_started", "warning")).status, 200);
+  assert.equal((await adminDB.collection("incidents").doc(checkInID).get()).get("status"), "check_in");
+  assert.equal((await adminDB.collection("incidentFanoutMarkers").doc(checkInID).get()).exists, false);
+  assert.equal((await uploadCheckIn("check_in_ok", "info")).status, 200);
+  assert.equal((await adminDB.collection("incidents").doc(checkInID).get()).get("status"), "resolved");
+
+  const reorderedCheckInID = crypto.randomUUID();
+  assert.equal((await uploadCheckIn("check_in_timeout", "critical", reorderedCheckInID)).status, 200);
+  assert.equal((await uploadCheckIn("check_in_started", "warning", reorderedCheckInID)).status, 200);
+  assert.equal((await adminDB.collection("incidents").doc(reorderedCheckInID).get()).get("status"), "alerted");
+  assert.equal((await adminDB.collection("incidentFanoutMarkers").doc(reorderedCheckInID).get()).exists, true);
+
   const eventID = crypto.randomUUID();
   const incidentID = crypto.randomUUID();
   const eventPacketID = crypto.randomUUID();
@@ -87,7 +139,56 @@ test("session and telemetry are authenticated and idempotent", async () => {
   assert.equal((await eventUpload()).status, 200);
   assert.equal((await eventUpload()).status, 200);
   assert.equal((await adminDB.collection("incidents").where("session_id", "==", rotated.session_id).get()).size, 1);
-  assert.equal((await adminDB.collection("incidentFanoutMarkers").get()).size, 1);
+  assert.equal((await adminDB.collection("incidentFanoutMarkers").get()).size, 2);
+  const push = await waitFor(async () => {
+    const outbox = await adminDB.collection("debugPushOutbox").where("incident_id", "==", incidentID).get();
+    return outbox.empty ? undefined : outbox.docs[0]?.data();
+  });
+  assert.equal(push?.body, "Safe Run: cần kiểm tra. Mở ứng dụng để xem chi tiết.");
+  assert.equal(JSON.stringify(push).includes("+84901234567"), false);
+  assert.equal(JSON.stringify(push).includes("heart_rate"), false);
+
+  const incidentRead = await fetch(`${apiBase}/v1/incidents/${incidentID}`, {
+    headers: { authorization: `Bearer ${caregiver.idToken}` },
+  });
+  assert.equal(incidentRead.status, 200);
+  const detail = await incidentRead.json() as { runner_phone_e164: string; status: string };
+  assert.equal(detail.runner_phone_e164, "+84901234567");
+  assert.equal(detail.status, "alerted");
+
+  const acknowledged = await fetch(`${apiBase}/v1/incidents/${incidentID}/acknowledge`, {
+    method: "POST", headers: { authorization: `Bearer ${caregiver.idToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ action: "seen" }),
+  });
+  assert.equal(acknowledged.status, 200);
+  assert.equal((await acknowledged.json() as { status: string }).status, "acknowledged");
+
+  const outsider = await anonymousUser();
+  assert.equal((await fetch(`${apiBase}/v1/incidents/${incidentID}`, {
+    headers: { authorization: `Bearer ${outsider.idToken}` },
+  })).status, 403);
+
+  const cancellation = {
+    schema_version: 1, packet_id: crypto.randomUUID(), session_id: rotated.session_id, seq: 5,
+    watch_timestamp: new Date().toISOString(), kind: "event",
+    payload: {
+      event_id: crypto.randomUUID(), event_type: "manual_sos_cancelled",
+      severity: "critical", incident_id: incidentID,
+    },
+  };
+  const cancellationResponse = await fetch(`${apiBase}/v1/run-sessions/${rotated.session_id}/events`, {
+    method: "POST", headers: { authorization: `Bearer ${rotated.ingest_token}`, "content-type": "application/json" },
+    body: JSON.stringify(cancellation),
+  });
+  assert.equal(cancellationResponse.status, 200);
+  assert.equal((await cancellationResponse.json() as { incident_status: string }).incident_status, "cancelled");
+  assert.equal((await adminDB.collection("incidents").doc(incidentID).get()).get("status"), "cancelled");
+
+  const deactivated = await fetch(`${apiBase}/v1/devices/${caregiverDeviceID}`, {
+    method: "DELETE", headers: { authorization: `Bearer ${caregiver.idToken}` },
+  });
+  assert.equal(deactivated.status, 200);
+  assert.equal((await adminDB.collection("users").doc(caregiver.localId).collection("devices").doc(caregiverDeviceID).get()).get("active"), false);
 
   const ended = await fetch(`${apiBase}/v1/run-sessions/${rotated.session_id}/end`, {
     method: "POST", headers: { authorization: `Bearer ${rotated.ingest_token}`, "content-type": "application/json" },

@@ -138,6 +138,20 @@ final class EnvelopeCodableTests: XCTestCase {
         )
     }
 
+    func testCancellationRequiresCriticalSeverityAndIncidentID() throws {
+        let json = """
+        {
+          "event_id": "33333333-3333-4333-8333-333333333333",
+          "event_type": "manual_sos_cancelled",
+          "severity": "info",
+          "incident_id": null
+        }
+        """
+        XCTAssertThrowsError(
+            try SafeRunJSON.makeDecoder().decode(EventPayload.self, from: Data(json.utf8))
+        )
+    }
+
     private func fixture(named name: String) throws -> Data {
         let url = try XCTUnwrap(
             Bundle.module.url(forResource: name, withExtension: "json")

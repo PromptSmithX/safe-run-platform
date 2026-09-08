@@ -12,4 +12,15 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(mapped.watchTimestamp, packet.watchTimestamp)
         XCTAssertEqual(mapped.sessionID, "server")
     }
+
+    func testDeviceRegistrationUsesSnakeCaseContract() throws {
+        let id = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+        let data = try SafeRunJSON.makeEncoder().encode(DeviceRegistrationRequest(
+            deviceID: id, role: .caregiver, fcmToken: "fake-token", appVersion: "0.1.0"
+        ))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(object["device_id"] as? String, id.uuidString)
+        XCTAssertEqual(object["fcm_token"] as? String, "fake-token")
+        XCTAssertEqual(object["role"] as? String, "caregiver")
+    }
 }

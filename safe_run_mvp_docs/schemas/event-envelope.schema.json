@@ -49,7 +49,13 @@
           "format": "uuid"
         },
         "event_type": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "session_started", "session_paused", "session_resumed", "session_ended",
+            "check_in_started", "check_in_ok", "check_in_help_requested", "check_in_timeout",
+            "manual_sos", "manual_sos_cancelled", "auto_anomaly_triggered",
+            "connection_degraded", "state_sync"
+          ]
         },
         "severity": {
           "type": "string",
@@ -76,7 +82,31 @@
           "type": "object"
         }
       },
-      "additionalProperties": true
+      "additionalProperties": true,
+      "allOf": [{
+        "if": { "properties": { "event_type": { "const": "manual_sos_cancelled" } } },
+        "then": {
+          "properties": {
+            "severity": { "const": "critical" },
+            "incident_id": { "type": "string", "format": "uuid" }
+          }
+        }
+      }, {
+        "if": { "properties": { "event_type": { "enum": ["check_in_started", "check_in_ok", "check_in_help_requested", "check_in_timeout"] } } },
+        "then": {
+          "required": ["rule_id"],
+          "properties": { "incident_id": { "type": "string", "format": "uuid" }, "rule_id": { "const": "high_hr_sustained_v1" } }
+        }
+      }, {
+        "if": { "properties": { "event_type": { "const": "check_in_started" } } },
+        "then": { "properties": { "severity": { "const": "warning" } } }
+      }, {
+        "if": { "properties": { "event_type": { "const": "check_in_ok" } } },
+        "then": { "properties": { "severity": { "const": "info" } } }
+      }, {
+        "if": { "properties": { "event_type": { "enum": ["check_in_help_requested", "check_in_timeout"] } } },
+        "then": { "properties": { "severity": { "const": "critical" } } }
+      }]
     }
   },
   "additionalProperties": false

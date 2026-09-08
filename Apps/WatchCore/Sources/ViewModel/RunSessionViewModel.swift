@@ -17,7 +17,12 @@ public final class RunSessionViewModel: ObservableObject {
 
     private let workoutProvider: any WorkoutDataProviding
     private let locationProvider: any LocationDataProviding
-    private let safetyConfig: RunnerSafetyConfig
+    @Published public private(set) var ruleState: HighHeartRateRuleState = .disabled
+    @Published public private(set) var activeConfigurationRevision: Int?
+    private var safetyConfig: RunnerSafetyConfig
+    private var pendingConfiguration: RunnerSafetyConfigurationEnvelope?
+    private var heartRateRule = SustainedHighHeartRateRule()
+    private var checkInCoordinator: CheckInCoordinator?
     private let locationPolicy: LocationQualityPolicy
     private let now: () -> Date
     private var packetCoordinator: WatchRunPacketCoordinator?
@@ -52,6 +57,9 @@ public final class RunSessionViewModel: ObservableObject {
         }
     }
 
+    public func attachCheckInCoordinator(_ coordinator: CheckInCoordinator) { checkInCoordinator = coordinator }
+    public func stageSafetyConfiguration(_ envelope: RunnerSafetyConfigurationEnvelope) { pendingConfiguration = envelope }
+
     public func start() async {
         guard state == .idle || state == .ended || state == .failed else {
             return
@@ -77,6 +85,8 @@ public final class RunSessionViewModel: ObservableObject {
         }
 
         let startDate = now()
+        if let pendingConfiguration { safetyConfig = pendingConfiguration.config; activeConfigurationRevision = pendingConfiguration.revision }
+        heartRateRule.resetForRun()
         do {
             try await workoutProvider.startWorkout(at: startDate)
             startedAt = startDate
@@ -170,6 +180,28 @@ public final class RunSessionViewModel: ObservableObject {
         startedAt = snapshot.startedAt ?? startedAt
         heartRateBPM = snapshot.heartRateBPM
         heartRateSampleDate = snapshot.heartRateSampleDate
+        evaluateHeartRateRule(at: now())
+    }
+
+    private func evaluateHeartRateRule(at date: Date) {
+        guard let startedAt else { return }
+        let activeCheckIn: Bool
+        if case .some(.active) = checkInCoordinator?.state { activeCheckIn = true } else { activeCheckIn = false }
+        let trigger = heartRateRule.evaluate(
+            sample: HeartRateRuleSample(bpm: heartRateBPM, sampledAt: heartRateSampleDate),
+            runStartedAt: startedAt, runState: state, now: date, config: safetyConfig, checkInActive: activeCheckIn
+        )
+        ruleState = heartRateRule.state
+        guard let trigger, let checkInCoordinator else { return }
+        Task { await checkInCoordinator.startCheckIn(reason: .sustainedHighHeartRate, evaluation: trigger.evaluation, timeoutSeconds: safetyConfig.checkInSeconds, at: date) }
+    }
+
+    public func checkInResolved(_ resolution: CheckInResolution) {
+        switch resolution {
+        case .ok: heartRateRule.runnerIsOK(at: now(), config: safetyConfig)
+        case .help, .timeout, .superseded: heartRateRule.escalationCompleted()
+        }
+        ruleState = heartRateRule.state
     }
 
     private func fail(with error: Error) {

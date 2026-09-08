@@ -10,6 +10,7 @@ public struct WatchTransportDiagnostics: Equatable, Sendable {
     public var queueCounts: [PacketPriority: Int]
     public var lastAcknowledgedPacketID: UUID?
     public var lastError: String?
+    public var lastConfigurationRevision: Int?
 
     public init(
         activationState: String = "notActivated",
@@ -25,6 +26,7 @@ public struct WatchTransportDiagnostics: Equatable, Sendable {
         self.queueCounts = queueCounts
         self.lastAcknowledgedPacketID = lastAcknowledgedPacketID
         self.lastError = lastError
+        self.lastConfigurationRevision = nil
     }
 }
 
@@ -70,21 +72,25 @@ public final class SystemWatchMessageSession: WatchMessageSession {
 @MainActor
 public final class WatchConnectivityTransport: NSObject, ObservableObject, WatchTransporting {
     @Published public private(set) var diagnostics = WatchTransportDiagnostics()
+    public var onSafetyConfiguration: ((RunnerSafetyConfigurationEnvelope) -> Void)?
 
     private let session: any WatchMessageSession
     private let queue: WatchRetryQueue
     private let acknowledgementTimeout: TimeInterval
+    private let configurationStore: WatchSafetyConfigStore?
     private var inFlightPacketID: UUID?
     private var timeoutTask: Task<Void, Never>?
 
     public init(
         queue: WatchRetryQueue,
         session: any WatchMessageSession = SystemWatchMessageSession(),
-        acknowledgementTimeout: TimeInterval = 15
+        acknowledgementTimeout: TimeInterval = 15,
+        configurationStore: WatchSafetyConfigStore? = nil
     ) {
         self.queue = queue
         self.session = session
         self.acknowledgementTimeout = acknowledgementTimeout
+        self.configurationStore = configurationStore
         super.init()
     }
 
@@ -169,6 +175,19 @@ public final class WatchConnectivityTransport: NSObject, ObservableObject, Watch
 }
 
 extension WatchConnectivityTransport: WCSessionDelegate {
+    nonisolated public func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
+        guard let data = applicationContext["safe_run_configuration"] as? Data else { return }
+        Task { @MainActor [weak self] in
+            guard let self, let store = self.configurationStore else { return }
+            do {
+                let envelope = try SafeRunJSON.makeDecoder().decode(RunnerSafetyConfigurationEnvelope.self, from: data)
+                try await store.save(envelope)
+                self.diagnostics.lastConfigurationRevision = envelope.revision
+                self.onSafetyConfiguration?(envelope)
+                self.diagnostics.lastError = nil
+            } catch { self.diagnostics.lastError = "invalid_safety_configuration" }
+        }
+    }
     nonisolated public func session(
         _ session: WCSession,
         activationDidCompleteWith activationState: WCSessionActivationState,

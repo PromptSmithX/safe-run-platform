@@ -77,9 +77,16 @@ Recommended `event_type` enum:
 - `check_in_help_requested`
 - `check_in_timeout`
 - `manual_sos`
+- `manual_sos_cancelled` — P0 update with a new `event_id` and the original manual-SOS `incident_id`.
 - `auto_anomaly_triggered`
 - `connection_degraded`
 - `state_sync`
+
+Milestone E check-in events use one stable, non-null `incident_id` and
+`rule_id = high_hr_sustained_v1`. `check_in_started` is warning severity,
+`check_in_ok` is info severity, and help/timeout are critical P0 events. A rule
+evaluation snapshot may be attached under `context.rule_evaluation`; it records configured evidence only
+and is not a medical diagnosis.
 
 Future:
 - `fall_detected`
@@ -92,14 +99,12 @@ Keep this local and optionally attach to auto-alert event for debugging.
 {
   "rule_id": "high_hr_sustained_v1",
   "rule_version": 1,
-  "window_s": 30,
-  "configured_threshold": 165,
-  "observed": {
-    "min_hr": 167,
-    "max_hr": 176,
-    "avg_hr": 171.2,
-    "speed_mps": 1.1
-  }
+  "threshold_bpm": 165,
+  "window_seconds": 30,
+  "sample_count": 4,
+  "minimum_bpm": 167,
+  "maximum_bpm": 176,
+  "average_bpm": 171.2
 }
 ```
 
@@ -157,6 +162,7 @@ Backend must enforce:
 - unique `event_id`;
 - unique `incident_id`;
 - do not send a second push fan-out for an incident already in `alerted|acknowledged|resolved` unless it is an explicit escalation update.
+- a `manual_sos_cancelled` event idempotently transitions its matching manual-SOS incident to `cancelled`; it never creates a second incident.
 
 ## 8. Queue priority
 

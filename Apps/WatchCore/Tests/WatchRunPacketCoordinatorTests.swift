@@ -66,6 +66,50 @@ final class WatchRunPacketCoordinatorTests: XCTestCase {
         XCTAssertNil(envelope.payload.heartRateBPM)
         XCTAssertNil(envelope.payload.heartRateSampleAgeMilliseconds)
     }
+
+    func testSOSAndCancellationAreP0AndShareIncidentIdentity() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let transport = RecordingWatchTransport()
+        let now = Date(timeIntervalSince1970: 1_800_000_010)
+        let identifiers = [
+            UUID(uuidString: "11111111-1111-4111-8111-111111111111")!,
+            UUID(uuidString: "22222222-2222-4222-8222-222222222222")!,
+            UUID(uuidString: "33333333-3333-4333-8333-333333333333")!,
+        ]
+        var index = 0
+        let coordinator = WatchRunPacketCoordinator(
+            transport: transport,
+            sessionStore: LocalRunSessionStore(fileURL: directory.appendingPathComponent("session.json")),
+            now: { now },
+            makeUUID: { defer { index += 1 }; return identifiers[index] },
+            sample: {
+                RunTelemetrySample(
+                    startedAt: now.addingTimeInterval(-60), heartRateBPM: 170,
+                    heartRateSampleDate: now.addingTimeInterval(-6),
+                    location: LocationReading(
+                        latitude: 10, longitude: 106, horizontalAccuracyMeters: 10,
+                        timestamp: now.addingTimeInterval(-21), speedMetersPerSecond: 2
+                    )
+                )
+            }
+        )
+
+        let sos = try await coordinator.queueManualSOS()
+        let cancellation = try await coordinator.queueManualSOSCancellation(incidentID: sos.incidentID)
+
+        XCTAssertEqual(transport.packets.map(\.priority), [.critical, .critical])
+        XCTAssertEqual(transport.packets.map(\.sequence), [1, 2])
+        let first = try SafeRunJSON.makeDecoder().decode(EventEnvelope.self, from: transport.packets[0].envelopeData)
+        let second = try SafeRunJSON.makeDecoder().decode(EventEnvelope.self, from: transport.packets[1].envelopeData)
+        XCTAssertEqual(first.payload.eventType, .manualSOS)
+        XCTAssertEqual(second.payload.eventType, .manualSOSCancelled)
+        XCTAssertEqual(first.payload.incidentID, second.payload.incidentID)
+        XCTAssertEqual(cancellation.incidentID, sos.incidentID)
+        XCTAssertNil(first.payload.context?.heartRateBPM)
+        XCTAssertNil(first.payload.context?.lastLocation)
+    }
 }
 
 @MainActor

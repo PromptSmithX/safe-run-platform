@@ -8,6 +8,9 @@ import telemetrySchema from "./generated-schemas/telemetry-envelope.schema.json"
 import eventSchema from "./generated-schemas/event-envelope.schema.json";
 import { APIError, sendError } from "./errors";
 import { issueIngestToken, tokenHashesMatch } from "./token";
+import { defaultFamilyFor, requireActiveFamilyMember } from "./membership";
+import { DeviceRepository } from "./devices";
+import { IncidentService } from "./incidents";
 
 const db = getFirestore();
 const ajv = new Ajv2020({ allErrors: true, strict: false });
@@ -15,6 +18,8 @@ addFormats(ajv);
 const validateTelemetry = ajv.compile(telemetrySchema);
 const validateEvent = ajv.compile(eventSchema);
 const tokenTTLMillis = 4 * 60 * 60 * 1000;
+const devices = new DeviceRepository();
+const incidents = new IncidentService();
 
 type AuthedRequest = Request & { runnerUID?: string; requestID?: string };
 type Envelope = {
@@ -130,9 +135,21 @@ async function ingest(request: Request, response: Response, kind: "telemetry" | 
   }
 
   const packetRef = sessionRef.collection("packets").doc(envelope.packet_id);
+  const eventType = kind === "event" ? String(envelope.payload.event_type) : undefined;
+  const checkInEvent = eventType !== undefined && ["check_in_started", "check_in_ok", "check_in_help_requested", "check_in_timeout"].includes(eventType);
+  const requestedIncidentID = kind === "event" && (envelope.payload.severity === "critical" || checkInEvent)
+    ? requireUUID(envelope.payload.incident_id, "incident_id") : undefined;
   const result = await db.runTransaction(async transaction => {
     const [session, packet] = await Promise.all([transaction.get(sessionRef), transaction.get(packetRef)]);
-    if (packet.exists) return { duplicate: true, lastSeq: session.get("last_seq") as number };
+    if (packet.exists) {
+      const duplicateIncident = requestedIncidentID
+        ? await transaction.get(db.collection("incidents").doc(requestedIncidentID)) : undefined;
+      return {
+        duplicate: true, lastSeq: session.get("last_seq") as number,
+        incidentID: duplicateIncident?.exists ? requestedIncidentID : undefined,
+        incidentStatus: duplicateIncident?.exists ? String(duplicateIncident.get("status")) : undefined,
+      };
+    }
     if (session.get("status") !== "active") throw new APIError(409, "SESSION_ENDED", "Session has ended");
 
     const minute = Math.floor(Date.now() / 60_000);
@@ -147,14 +164,37 @@ async function ingest(request: Request, response: Response, kind: "telemetry" | 
     let incidentID: string | undefined;
     let incidentRef: FirebaseFirestore.DocumentReference | undefined;
     let incidentExists = false;
+    let incident: FirebaseFirestore.DocumentSnapshot | undefined;
+    let alertMarker: FirebaseFirestore.DocumentSnapshot | undefined;
+    let cancellationMarker: FirebaseFirestore.DocumentSnapshot | undefined;
+    let activeCheckInRef: FirebaseFirestore.DocumentReference | undefined;
+    let activeCheckIn: FirebaseFirestore.DocumentSnapshot | undefined;
+    let resultingIncidentStatus: string | undefined;
+    const cancellation = kind === "event" && envelope.payload.event_type === "manual_sos_cancelled";
     if (kind === "event") {
       eventID = requireUUID(envelope.payload.event_id, "event_id");
       eventRef = sessionRef.collection("events").doc(eventID);
       eventExists = (await transaction.get(eventRef)).exists;
-      if (envelope.payload.severity === "critical") {
-        incidentID = requireUUID(envelope.payload.incident_id, "incident_id");
+      if (envelope.payload.severity === "critical" || checkInEvent) {
+        incidentID = requestedIncidentID!;
         incidentRef = db.collection("incidents").doc(incidentID);
-        incidentExists = (await transaction.get(incidentRef)).exists;
+        incident = await transaction.get(incidentRef);
+        incidentExists = incident.exists;
+        resultingIncidentStatus = incidentExists ? String(incident.get("status")) : undefined;
+        alertMarker = await transaction.get(db.collection("incidentFanoutMarkers").doc(incidentID));
+        if (cancellation) {
+          cancellationMarker = await transaction.get(db.collection("incidentFanoutMarkers").doc(`${incidentID}__cancelled`));
+          if (!incidentExists || incident.get("session_id") !== sessionRef.id || incident.get("type") !== "manual_sos") {
+            throw new APIError(409, "INCIDENT_NOT_CANCELLABLE", "Manual SOS incident does not match this session");
+          }
+        }
+        if (eventType === "manual_sos" && !incidentExists) {
+          const activeID = session.get("active_incident_id") as string | undefined;
+          if (activeID && activeID !== incidentID) {
+            activeCheckInRef = db.collection("incidents").doc(activeID);
+            activeCheckIn = await transaction.get(activeCheckInRef);
+          }
+        }
       }
     }
 
@@ -193,26 +233,85 @@ async function ingest(request: Request, response: Response, kind: "telemetry" | 
         type: envelope.payload.event_type, severity: envelope.payload.severity,
         watch_at: envelope.watch_timestamp, received_at: FieldValue.serverTimestamp(), payload: envelope.payload,
       });
-      if (envelope.payload.severity === "critical") {
+      if (checkInEvent) {
+        const escalation = eventType === "check_in_help_requested" || eventType === "check_in_timeout";
         if (!incidentExists) {
           transaction.create(incidentRef!, {
             session_id: sessionRef.id, family_id: session.get("family_id"), runner_uid: session.get("runner_uid"),
-            type: envelope.payload.event_type, severity: "critical", status: "alerted",
-            created_at: FieldValue.serverTimestamp(), context: envelope.payload.context ?? null,
+            type: eventType, severity: escalation ? "critical" : envelope.payload.severity,
+            status: escalation ? "alerted" : eventType === "check_in_started" ? "check_in" : "resolved",
+            created_at: FieldValue.serverTimestamp(), runner_event_at: envelope.watch_timestamp,
+            context: envelope.payload.context ?? null, acknowledged_by: null, acknowledged_at: null,
+            resolution_reason: eventType === "check_in_ok" ? "runner_ok" : null,
           });
-          transaction.set(db.collection("incidentFanoutMarkers").doc(incidentID!), {
-            incident_id: incidentID, status: "pending", created_at: FieldValue.serverTimestamp(),
+          if (escalation) transaction.set(db.collection("incidentFanoutMarkers").doc(incidentID!), {
+            incident_id: incidentID, family_id: session.get("family_id"), phase: "alert",
+            status: "pending", created_at: FieldValue.serverTimestamp(),
+          });
+          transaction.update(sessionRef, { active_incident_id: escalation || eventType === "check_in_started" ? incidentID : null });
+          resultingIncidentStatus = escalation ? "alerted" : eventType === "check_in_started" ? "check_in" : "resolved";
+        } else if (incident!.get("session_id") !== sessionRef.id) {
+          throw new APIError(409, "INCIDENT_SESSION_MISMATCH", "Check-in incident does not match this session");
+        } else if (escalation && incident!.get("status") === "check_in") {
+          transaction.update(incidentRef!, { status: "alerted", type: eventType, severity: "critical", context: envelope.payload.context ?? incident!.get("context") });
+          if (!alertMarker?.exists) transaction.create(db.collection("incidentFanoutMarkers").doc(incidentID!), {
+            incident_id: incidentID, family_id: session.get("family_id"), phase: "alert", status: "pending", created_at: FieldValue.serverTimestamp(),
           });
           transaction.update(sessionRef, { active_incident_id: incidentID });
+          resultingIncidentStatus = "alerted";
+        } else if (eventType === "check_in_ok" && incident!.get("status") === "check_in") {
+          transaction.update(incidentRef!, { status: "resolved", resolution_reason: "runner_ok", resolved_at: FieldValue.serverTimestamp() });
+          transaction.update(sessionRef, { active_incident_id: null });
+          resultingIncidentStatus = "resolved";
+        }
+      } else if (envelope.payload.severity === "critical") {
+        if (cancellation) {
+          if (incident!.get("status") !== "cancelled") {
+            transaction.update(incidentRef!, {
+              status: "cancelled", cancelled_at: FieldValue.serverTimestamp(),
+              cancelled_by: "runner", cancellation_event_id: eventID,
+            });
+            transaction.update(sessionRef, { active_incident_id: null });
+            resultingIncidentStatus = "cancelled";
+          }
+          if (alertMarker?.exists && alertMarker.get("status") === "pending") {
+            transaction.update(alertMarker.ref, { status: "superseded", completed_at: FieldValue.serverTimestamp() });
+          } else if (!cancellationMarker?.exists) {
+            transaction.create(db.collection("incidentFanoutMarkers").doc(`${incidentID}__cancelled`), {
+              incident_id: incidentID, family_id: session.get("family_id"), phase: "cancelled",
+              status: "pending", created_at: FieldValue.serverTimestamp(),
+            });
+          }
+        } else if (!incidentExists) {
+          if (eventType === "manual_sos" && activeCheckInRef && activeCheckIn?.exists && activeCheckIn.get("status") === "check_in") {
+            transaction.update(activeCheckInRef, {
+              status: "resolved", resolution_reason: "superseded_by_manual_sos", resolved_at: FieldValue.serverTimestamp(),
+            });
+          }
+          transaction.create(incidentRef!, {
+            session_id: sessionRef.id, family_id: session.get("family_id"), runner_uid: session.get("runner_uid"),
+            type: envelope.payload.event_type, severity: "critical", status: "alerted",
+            created_at: FieldValue.serverTimestamp(), runner_event_at: envelope.watch_timestamp,
+            context: envelope.payload.context ?? null, acknowledged_by: null, acknowledged_at: null,
+          });
+          transaction.set(db.collection("incidentFanoutMarkers").doc(incidentID!), {
+            incident_id: incidentID, family_id: session.get("family_id"), phase: "alert",
+            status: "pending", created_at: FieldValue.serverTimestamp(),
+          });
+          transaction.update(sessionRef, { active_incident_id: incidentID });
+          resultingIncidentStatus = "alerted";
         }
       }
     }
-    return { duplicate: false, lastSeq: Math.max(previousSequence, envelope.seq), incidentID };
+    return {
+      duplicate: false, lastSeq: Math.max(previousSequence, envelope.seq), incidentID,
+      incidentStatus: incidentID ? resultingIncidentStatus : undefined,
+    };
   });
   response.status(200).json({
     accepted: true, duplicate: result.duplicate, last_seq: result.lastSeq,
     server_time: new Date().toISOString(), incident_id: result.incidentID,
-    incident_status: result.incidentID ? "alerted" : undefined,
+    incident_status: result.incidentStatus,
   });
 }
 
@@ -239,6 +338,51 @@ app.post("/v1/run-sessions/:session_id/end", async (request, response, next) => 
       });
     });
     response.status(200).json({ accepted: true, server_time: new Date().toISOString() });
+  } catch (error) { next(error); }
+});
+
+app.post("/v1/devices", requireUser, async (request: AuthedRequest, response, next) => {
+  try {
+    const uid = request.runnerUID!;
+    const deviceID = requireUUID(request.body?.device_id, "device_id");
+    if (request.body?.platform !== "ios" || !["runner", "caregiver"].includes(request.body?.role)) {
+      throw new APIError(400, "INVALID_SCHEMA", "platform and role are invalid");
+    }
+    const token = request.body?.fcm_token;
+    const appVersion = request.body?.app_version;
+    if (typeof token !== "string" || token.length < 10 || token.length > 4096 || typeof appVersion !== "string" || appVersion.length > 64) {
+      throw new APIError(400, "INVALID_SCHEMA", "FCM token or app version is invalid");
+    }
+    const familyID = await defaultFamilyFor(uid);
+    const member = await requireActiveFamilyMember(uid, familyID);
+    if (member.role !== request.body.role) {
+      throw new APIError(403, "FORBIDDEN", "Device role must match active family membership");
+    }
+    await devices.register(uid, deviceID, { role: request.body.role, token, appVersion, familyID });
+    response.status(200).json({ registered: true, device_id: deviceID });
+  } catch (error) { next(error); }
+});
+
+app.delete("/v1/devices/:device_id", requireUser, async (request: AuthedRequest, response, next) => {
+  try {
+    const deviceID = requireUUID(request.params.device_id, "device_id");
+    await devices.deactivate(request.runnerUID!, deviceID);
+    response.status(200).json({ registered: false, device_id: deviceID });
+  } catch (error) { next(error); }
+});
+
+app.get("/v1/incidents/:incident_id", requireUser, async (request: AuthedRequest, response, next) => {
+  try {
+    const incidentID = requireUUID(request.params.incident_id, "incident_id");
+    response.status(200).json(await incidents.detail(request.runnerUID!, incidentID));
+  } catch (error) { next(error); }
+});
+
+app.post("/v1/incidents/:incident_id/acknowledge", requireUser, async (request: AuthedRequest, response, next) => {
+  try {
+    if (request.body?.action !== "seen") throw new APIError(400, "INVALID_SCHEMA", "Only the seen action is supported");
+    const incidentID = requireUUID(request.params.incident_id, "incident_id");
+    response.status(200).json(await incidents.acknowledge(request.runnerUID!, incidentID));
   } catch (error) { next(error); }
 });
 

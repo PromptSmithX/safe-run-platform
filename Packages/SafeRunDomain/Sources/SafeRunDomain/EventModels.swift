@@ -19,21 +19,48 @@ public struct EventContext: Codable, Equatable, Sendable {
     public var heartRateBPM: Double?
     public var lastLocation: LastKnownLocation?
     public var elapsedSeconds: Int?
+    public var ruleEvaluation: RuleEvaluationSnapshot?
 
     public init(
         heartRateBPM: Double? = nil,
         lastLocation: LastKnownLocation? = nil,
-        elapsedSeconds: Int? = nil
+        elapsedSeconds: Int? = nil,
+        ruleEvaluation: RuleEvaluationSnapshot? = nil
     ) {
         self.heartRateBPM = heartRateBPM
         self.lastLocation = lastLocation
         self.elapsedSeconds = elapsedSeconds
+        self.ruleEvaluation = ruleEvaluation
     }
 
     private enum CodingKeys: String, CodingKey {
         case heartRateBPM = "heart_rate_bpm"
         case lastLocation = "last_location"
         case elapsedSeconds = "elapsed_s"
+        case ruleEvaluation = "rule_evaluation"
+    }
+}
+
+public struct RuleEvaluationSnapshot: Codable, Equatable, Sendable {
+    public let ruleID: String
+    public let ruleVersion: Int
+    public let thresholdBPM: Double
+    public let windowSeconds: TimeInterval
+    public let sampleCount: Int
+    public let minimumBPM: Double
+    public let maximumBPM: Double
+    public let averageBPM: Double
+
+    public init(ruleID: String = "high_hr_sustained_v1", ruleVersion: Int = 1, thresholdBPM: Double, windowSeconds: TimeInterval, sampleCount: Int, minimumBPM: Double, maximumBPM: Double, averageBPM: Double) {
+        self.ruleID = ruleID; self.ruleVersion = ruleVersion; self.thresholdBPM = thresholdBPM
+        self.windowSeconds = windowSeconds; self.sampleCount = sampleCount; self.minimumBPM = minimumBPM
+        self.maximumBPM = maximumBPM; self.averageBPM = averageBPM
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case ruleID = "rule_id", ruleVersion = "rule_version", thresholdBPM = "threshold_bpm"
+        case windowSeconds = "window_seconds", sampleCount = "sample_count", minimumBPM = "minimum_bpm"
+        case maximumBPM = "maximum_bpm", averageBPM = "average_bpm"
     }
 }
 
@@ -53,6 +80,7 @@ public struct EventPayload: Codable, Equatable, Sendable {
         incidentID: UUID? = nil,
         context: EventContext? = nil
     ) {
+        precondition(Self.isValid(type: eventType, severity: severity, incidentID: incidentID, ruleID: ruleID), "Invalid event semantics")
         self.eventID = eventID
         self.eventType = eventType
         self.severity = severity
@@ -88,6 +116,16 @@ public struct EventPayload: Codable, Equatable, Sendable {
         self.ruleID = try container.decodeIfPresent(String.self, forKey: .ruleID)
         self.incidentID = try container.decodeIfPresent(UUID.self, forKey: .incidentID)
         self.context = try container.decodeIfPresent(EventContext.self, forKey: .context)
+        if eventType == .manualSOSCancelled && (severity != .critical || incidentID == nil) {
+            throw DecodingError.dataCorruptedError(
+                forKey: .incidentID,
+                in: container,
+                debugDescription: "manual_sos_cancelled must be critical and include incident_id."
+            )
+        }
+        guard Self.isValid(type: eventType, severity: severity, incidentID: incidentID, ruleID: ruleID) else {
+            throw DecodingError.dataCorruptedError(forKey: .eventType, in: container, debugDescription: "Invalid event semantics")
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -102,6 +140,16 @@ public struct EventPayload: Codable, Equatable, Sendable {
             try container.encodeNil(forKey: .incidentID)
         }
         try container.encodeIfPresent(context, forKey: .context)
+    }
+
+    private static func isValid(type: SafetyEventType, severity: IncidentSeverity, incidentID: UUID?, ruleID: String?) -> Bool {
+        switch type {
+        case .manualSOSCancelled: return severity == .critical && incidentID != nil
+        case .checkInStarted: return severity == .warning && incidentID != nil && ruleID == "high_hr_sustained_v1"
+        case .checkInOK: return severity == .info && incidentID != nil && ruleID == "high_hr_sustained_v1"
+        case .checkInHelpRequested, .checkInTimeout: return severity == .critical && incidentID != nil && ruleID == "high_hr_sustained_v1"
+        default: return true
+        }
     }
 }
 

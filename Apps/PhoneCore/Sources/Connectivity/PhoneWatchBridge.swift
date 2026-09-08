@@ -12,6 +12,7 @@ public struct PhoneTransportDiagnostics: Equatable, Sendable {
     public var queueCounts: [PacketPriority: Int] = [:]
     public var lastPacketID: UUID?
     public var lastError: String?
+    public var lastConfigurationRevision: Int?
 
     public init() {}
 }
@@ -22,6 +23,8 @@ public final class PhoneWatchBridge: NSObject, ObservableObject {
 
     private let session: WCSession
     private let queue: SQLiteGatewayQueue?
+    private var pendingConfiguration: RunnerSafetyConfigurationEnvelope?
+    private var latestConfiguration: RunnerSafetyConfigurationEnvelope?
     public var onPacketAccepted: ((TransportPacket) -> Void)?
 
     public init(queue: SQLiteGatewayQueue?, session: WCSession = .default) {
@@ -35,6 +38,17 @@ public final class PhoneWatchBridge: NSObject, ObservableObject {
         session.activate()
         refreshConnection()
         Task { await refreshQueue() }
+    }
+
+    public func sendSafetyConfiguration(_ envelope: RunnerSafetyConfigurationEnvelope) throws {
+        pendingConfiguration = envelope
+        latestConfiguration = envelope
+        guard session.activationState == .activated else { diagnostics.lastError = "configuration_pending_activation"; return }
+        let data = try SafeRunJSON.makeEncoder().encode(envelope)
+        try session.updateApplicationContext(["safe_run_configuration": data])
+        diagnostics.lastConfigurationRevision = envelope.revision
+        diagnostics.lastError = nil
+        pendingConfiguration = nil
     }
 
     public func processMessageData(_ data: Data) async -> Data {
@@ -106,6 +120,8 @@ public final class PhoneWatchBridge: NSObject, ObservableObject {
     }
 }
 
+public enum PhoneConfigurationSyncError: Error { case sessionNotActivated }
+
 extension PhoneWatchBridge: WCSessionDelegate {
     nonisolated public func session(
         _ session: WCSession,
@@ -115,6 +131,7 @@ extension PhoneWatchBridge: WCSessionDelegate {
         Task { @MainActor [weak self] in
             self?.refreshConnection()
             if let error { self?.diagnostics.lastError = error.localizedDescription }
+            if error == nil, let pending = self?.pendingConfiguration { try? self?.sendSafetyConfiguration(pending) }
         }
     }
 
@@ -129,6 +146,13 @@ extension PhoneWatchBridge: WCSessionDelegate {
 
     nonisolated public func sessionReachabilityDidChange(_ session: WCSession) {
         Task { @MainActor [weak self] in self?.refreshConnection() }
+    }
+
+    nonisolated public func sessionWatchStateDidChange(_ session: WCSession) {
+        Task { @MainActor [weak self] in
+            self?.refreshConnection()
+            if let latest = self?.latestConfiguration { try? self?.sendSafetyConfiguration(latest) }
+        }
     }
 
     nonisolated public func session(

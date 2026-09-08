@@ -61,7 +61,7 @@ paths:
             schema:
               $ref: './schemas/event-envelope.schema.json'
       responses:
-        '200': { description: Accepted; critical events may create/update an incident }
+        '200': { description: Accepted; check-in start/OK are audited without push, while help/timeout and SOS may create one idempotent alert fan-out }
   /v1/run-sessions/{session_id}/end:
     post:
       summary: End session and revoke ingest token
@@ -77,8 +77,43 @@ paths:
     post:
       summary: Register caregiver/runner iOS push token
       security: [{ FirebaseAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_id, platform, role, fcm_token, app_version]
+              properties:
+                device_id: { type: string, format: uuid }
+                platform: { const: ios }
+                role: { type: string, enum: [runner, caregiver] }
+                fcm_token: { type: string, minLength: 10, maxLength: 4096 }
+                app_version: { type: string, maxLength: 64 }
       responses:
         '200': { description: Registered }
+  /v1/devices/{device_id}:
+    delete:
+      summary: Soft-deactivate the authenticated user's push device
+      security: [{ FirebaseAuth: [] }]
+      parameters:
+        - in: path
+          name: device_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Deactivated }
+  /v1/incidents/{incident_id}:
+    get:
+      summary: Read an incident after active family-membership authorization
+      security: [{ FirebaseAuth: [] }]
+      parameters:
+        - in: path
+          name: incident_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Incident detail with event context and acknowledgement state }
   /v1/incidents/{incident_id}/acknowledge:
     post:
       summary: Caregiver acknowledges incident
@@ -88,6 +123,15 @@ paths:
           name: incident_id
           required: true
           schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { const: seen }
       responses:
         '200': { description: Acknowledged }
 components:

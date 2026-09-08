@@ -1,18 +1,30 @@
 import SafeRunDomain
 import SafeRunWatchCore
 import SwiftUI
+import WatchKit
 
 @main
 @MainActor
 struct SafeRunWatchApplication: App {
     @StateObject private var viewModel: RunSessionViewModel
     @StateObject private var transport: WatchConnectivityTransport
+    @StateObject private var sos: ManualSOSController
+    @StateObject private var checkIn: CheckInCoordinator
 
     init() {
         let providers = WatchProviderFactory.make()
+        #if DEBUG
+        let debugRule = ProcessInfo.processInfo.arguments.contains("-SafeRunRuleTest")
+        let initialConfig = debugRule
+            ? RunnerSafetyConfig(highHRThresholdBPM: 170, highHRSustainedSeconds: 5, checkInSeconds: 10, ruleCooldownSeconds: 10, warmUpSeconds: 0, highHRRearmSeconds: 5, minimumHighHRSamples: 3)
+            : RunnerSafetyConfig()
+        #else
+        let initialConfig = RunnerSafetyConfig()
+        #endif
         let viewModel = RunSessionViewModel(
             workoutProvider: providers.workout,
-            locationProvider: providers.location
+            locationProvider: providers.location,
+            safetyConfig: initialConfig
         )
         let support = FileManager.default.urls(
             for: .applicationSupportDirectory,
@@ -22,21 +34,34 @@ struct SafeRunWatchApplication: App {
         let sessionStore = LocalRunSessionStore(
             fileURL: support.appendingPathComponent("active-run.json")
         )
-        let transport = WatchConnectivityTransport(queue: queue)
+        let configStore = WatchSafetyConfigStore(fileURL: support.appendingPathComponent("safety-config.json"))
+        let transport = WatchConnectivityTransport(queue: queue, configurationStore: configStore)
         let coordinator = WatchRunPacketCoordinator(
             transport: transport,
             sessionStore: sessionStore,
             sample: { [weak viewModel] in viewModel?.telemetrySample() }
         )
         viewModel.attachPacketCoordinator(coordinator)
+        let checkIn = CheckInCoordinator(dispatcher: coordinator)
+        checkIn.onResolved = { [weak viewModel] resolution in viewModel?.checkInResolved(resolution) }
+        viewModel.attachCheckInCoordinator(checkIn)
+        transport.onSafetyConfiguration = { [weak viewModel] envelope in viewModel?.stageSafetyConfiguration(envelope) }
+        #if DEBUG
+        if !debugRule { Task { if let envelope = await configStore.load() { viewModel.stageSafetyConfiguration(envelope) } } }
+        #else
+        Task { if let envelope = await configStore.load() { viewModel.stageSafetyConfiguration(envelope) } }
+        #endif
+        let sos = ManualSOSController(dispatcher: coordinator)
         transport.activate()
         _viewModel = StateObject(wrappedValue: viewModel)
         _transport = StateObject(wrappedValue: transport)
+        _sos = StateObject(wrappedValue: sos)
+        _checkIn = StateObject(wrappedValue: checkIn)
     }
 
     var body: some Scene {
         WindowGroup {
-            RunSessionView(viewModel: viewModel, transport: transport)
+            RunSessionView(viewModel: viewModel, transport: transport, sos: sos, checkIn: checkIn)
         }
     }
 }
@@ -48,6 +73,9 @@ private enum WatchProviderFactory {
         location: any LocationDataProviding
     ) {
         #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-SafeRunRuleTest") {
+            return (FakeWorkoutProvider(samples: [175, 178, 181, 179, 182, 180]), FakeLocationProvider())
+        }
         if isSimulator || ProcessInfo.processInfo.arguments.contains("-SafeRunFakeData") {
             return (
                 FakeWorkoutProvider(),
@@ -74,6 +102,9 @@ private enum WatchProviderFactory {
 private struct RunSessionView: View {
     @ObservedObject var viewModel: RunSessionViewModel
     @ObservedObject var transport: WatchConnectivityTransport
+    @ObservedObject var sos: ManualSOSController
+    @ObservedObject var checkIn: CheckInCoordinator
+    @State private var isHoldingSOS = false
 
     var body: some View {
         Group {
@@ -106,6 +137,8 @@ private struct RunSessionView: View {
 
             Button("Start run") {
                 Task {
+                    sos.resetForRun()
+                    checkIn.resetForRun()
                     await viewModel.start()
                 }
             }
@@ -117,6 +150,9 @@ private struct RunSessionView: View {
 
     private var activeView: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
+            if case .active(let checkInContext) = checkIn.state {
+                checkInView(checkInContext, now: context.date)
+            } else {
             VStack(spacing: 5) {
                 Text(heartRateText(at: context.date))
                     .font(.system(size: 34, weight: .bold, design: .rounded))
@@ -154,6 +190,12 @@ private struct RunSessionView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Text("Config r\(viewModel.activeConfigurationRevision ?? 0) • \(String(describing: viewModel.ruleState))")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.secondary)
+
+                sosControls
+
                 Button("Stop") {
                     Task {
                         await viewModel.stop()
@@ -162,6 +204,80 @@ private struct RunSessionView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
                 .accessibilityHint("Stops and saves the current workout")
+            }
+            }
+        }
+    }
+
+    private func checkInView(_ context: CheckInContext, now: Date) -> some View {
+        let remaining = max(0, Int(ceil(context.deadline.timeIntervalSince(now))))
+        return VStack(spacing: 8) {
+            Image(systemName: "heart.text.square.fill").font(.title).foregroundStyle(.orange)
+            Text("Bạn có ổn không?").font(.headline)
+            Text("\(remaining)s").font(.title.monospacedDigit())
+            Button("Tôi ổn") { Task { await checkIn.userOK() } }.buttonStyle(.borderedProminent).tint(.green)
+            Button("Gọi người thân") { Task { await checkIn.userRequestsHelp() } }.buttonStyle(.borderedProminent).tint(.red)
+            Button("Giữ SOS 2 giây") { }
+                .buttonStyle(.bordered)
+                .onLongPressGesture(minimumDuration: 2) {
+                    checkIn.supersedeWithManualSOS()
+                    WKInterfaceDevice.current().play(.notification)
+                    Task { await sos.trigger() }
+                }
+        }
+        .task(id: remaining) {
+            if remaining == 20 { WKInterfaceDevice.current().play(.notification) }
+            if (1...3).contains(remaining) { WKInterfaceDevice.current().play(.click) }
+            await checkIn.tick(at: now)
+        }
+    }
+
+    @ViewBuilder
+    private var sosControls: some View {
+        switch sos.state {
+        case .idle, .failed:
+            VStack(spacing: 3) {
+                Button {
+                    // Long press below is the deliberate activation path.
+                } label: {
+                    Label(isHoldingSOS ? "Tiếp tục giữ…" : "Giữ SOS 2 giây", systemImage: "sos.circle.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .onLongPressGesture(minimumDuration: 2, maximumDistance: 30) {
+                    isHoldingSOS = false
+                    WKInterfaceDevice.current().play(.notification)
+                    checkIn.supersedeWithManualSOS()
+                    Task { await sos.trigger() }
+                } onPressingChanged: { pressing in
+                    isHoldingSOS = pressing
+                }
+                .accessibilityLabel("SOS")
+                .accessibilityHint("Giữ hai giây để xếp hàng cảnh báo cho người thân")
+
+                if case .failed(let message) = sos.state {
+                    Text(message).font(.system(size: 8)).foregroundStyle(.orange)
+                }
+            }
+        case .queueing:
+            ProgressView("Đang xếp hàng SOS…")
+        case .queued(let receipt):
+            VStack(spacing: 3) {
+                Text("SOS đã xếp hàng • …\(receipt.incidentID.uuidString.suffix(6))")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.orange)
+                Button("Hủy cảnh báo") { Task { await sos.cancel() } }
+                    .buttonStyle(.bordered)
+            }
+        case .cancelling:
+            ProgressView("Đang xếp hàng yêu cầu hủy…")
+        case .cancellationQueued:
+            VStack(spacing: 3) {
+                Text("Yêu cầu hủy đã xếp hàng")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.orange)
+                Button("Xong") { sos.resetAfterCancellation() }
             }
         }
     }
