@@ -7,6 +7,7 @@ public final class RemoteWorkoutCoordinator: NSObject, ObservableObject {
     @Published public private(set) var state = "waiting"
     @Published public private(set) var startedAt: Date?
     @Published public private(set) var lastError: String?
+    public var onSessionChanged: (() -> Void)?
 
     private let healthStore: HKHealthStore
     private var mirroredSession: HKWorkoutSession?
@@ -29,6 +30,7 @@ public final class RemoteWorkoutCoordinator: NSObject, ObservableObject {
         startedAt = session.startDate
         state = String(describing: session.state)
         lastError = nil
+        onSessionChanged?()
     }
 }
 
@@ -42,6 +44,7 @@ extension RemoteWorkoutCoordinator: HKWorkoutSessionDelegate {
         Task { @MainActor [weak self] in
             self?.state = String(describing: toState)
             if self?.startedAt == nil { self?.startedAt = workoutSession.startDate }
+            self?.onSessionChanged?()
         }
     }
 

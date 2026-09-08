@@ -11,14 +11,5 @@ done
 
 "$SCRIPT_DIR/verify-e.sh"
 cd "$REPO_ROOT"
-(
-  cd Backend/functions
-  npm ci --ignore-scripts
-  npm run typecheck
-  npm test
-  npx firebase emulators:exec --project demo-safe-run --only auth,firestore,functions "npm run test:emulator"
-)
-xcodebuild -workspace SafeRun.xcworkspace -scheme SafeRunWatchCore -configuration Debug -destination "platform=watchOS Simulator,name=Apple Watch Series 10 (46mm)" CODE_SIGNING_ALLOWED=NO test
-xcodebuild -workspace SafeRun.xcworkspace -scheme SafeRunPhoneCore -configuration Debug -destination "platform=iOS Simulator,name=iPhone 16" CODE_SIGNING_ALLOWED=NO test
-xcodebuild -workspace SafeRun.xcworkspace -scheme SafeRunWatchApp -configuration Debug -destination "generic/platform=watchOS Simulator" CODE_SIGNING_ALLOWED=NO build
-xcodebuild -workspace SafeRun.xcworkspace -scheme SafeRunApp -configuration Debug -destination "generic/platform=iOS Simulator" CODE_SIGNING_ALLOWED=NO build
+xcodebuild -workspace SafeRun.xcworkspace -scheme SafeRunWatchApp -configuration Release -destination "generic/platform=watchOS Simulator" CODE_SIGNING_ALLOWED=NO build
+xcodebuild -workspace SafeRun.xcworkspace -scheme SafeRunApp -configuration Release -destination "generic/platform=iOS Simulator" CODE_SIGNING_ALLOWED=NO build

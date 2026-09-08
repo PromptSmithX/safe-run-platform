@@ -24,6 +24,19 @@ paths:
       responses:
         '201':
           description: Session created or existing active idempotent session returned
+  /v1/run-sessions/reconcile:
+    post:
+      summary: Reconcile local runner sessions after iPhone restart
+      security: [{ FirebaseAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './schemas/session-reconciliation.schema.json'
+      responses:
+        '200':
+          description: Authorized session mappings without credentials or health payload
   /v1/run-sessions/{session_id}/telemetry:
     post:
       summary: Ingest telemetry packet

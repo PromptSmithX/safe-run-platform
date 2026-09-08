@@ -1,3 +1,4 @@
+import Combine
 import SafeRunDomain
 import SafeRunWatchCore
 import SwiftUI
@@ -6,6 +7,7 @@ import WatchKit
 @main
 @MainActor
 struct SafeRunWatchApplication: App {
+    @WKExtensionDelegateAdaptor(SafeRunWatchExtensionDelegate.self) private var extensionDelegate
     @StateObject private var viewModel: RunSessionViewModel
     @StateObject private var transport: WatchConnectivityTransport
     @StateObject private var sos: ManualSOSController
@@ -30,16 +32,19 @@ struct SafeRunWatchApplication: App {
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first!
-        let queue = WatchRetryQueue(fileURL: support.appendingPathComponent("watch-packets.json"))
-        let sessionStore = LocalRunSessionStore(
-            fileURL: support.appendingPathComponent("active-run.json")
+        let persistence = WatchRunPersistence(
+            fileURL: support.appendingPathComponent("watch-run-v2.json"),
+            legacyQueueURL: support.appendingPathComponent("watch-packets.json"),
+            legacyRunURL: support.appendingPathComponent("active-run.json")
         )
         let configStore = WatchSafetyConfigStore(fileURL: support.appendingPathComponent("safety-config.json"))
-        let transport = WatchConnectivityTransport(queue: queue, configurationStore: configStore)
+        let chaos = DebugChaosController()
+        let transport = WatchConnectivityTransport(persistence: persistence, configurationStore: configStore, chaos: chaos.configuration)
         let coordinator = WatchRunPacketCoordinator(
             transport: transport,
-            sessionStore: sessionStore,
-            sample: { [weak viewModel] in viewModel?.telemetrySample() }
+            persistence: persistence,
+            sample: { [weak viewModel] in viewModel?.telemetrySample() },
+            chaos: chaos
         )
         viewModel.attachPacketCoordinator(coordinator)
         let checkIn = CheckInCoordinator(dispatcher: coordinator)
@@ -52,6 +57,7 @@ struct SafeRunWatchApplication: App {
         Task { if let envelope = await configStore.load() { viewModel.stageSafetyConfiguration(envelope) } }
         #endif
         let sos = ManualSOSController(dispatcher: coordinator)
+        sos.onQueued = { [weak viewModel] _ in viewModel?.manualSOSQueuedDuringRecovery() }
         transport.activate()
         _viewModel = StateObject(wrappedValue: viewModel)
         _transport = StateObject(wrappedValue: transport)
@@ -62,7 +68,19 @@ struct SafeRunWatchApplication: App {
     var body: some Scene {
         WindowGroup {
             RunSessionView(viewModel: viewModel, transport: transport, sos: sos, checkIn: checkIn)
+                .task { await viewModel.recoverActiveRun() }
+                .onReceive(NotificationCenter.default.publisher(for: .safeRunRecoverActiveWorkout)) { _ in
+                    Task { await viewModel.recoverActiveRun() }
+                }
         }
+    }
+}
+
+private extension Notification.Name { static let safeRunRecoverActiveWorkout = Notification.Name("SafeRunRecoverActiveWorkout") }
+
+final class SafeRunWatchExtensionDelegate: NSObject, WKExtensionDelegate {
+    func handleActiveWorkoutRecovery() {
+        NotificationCenter.default.post(name: .safeRunRecoverActiveWorkout, object: nil)
     }
 }
 

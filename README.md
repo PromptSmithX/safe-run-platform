@@ -55,8 +55,13 @@ thuộc Phase 2 hoặc ngoài MVP hiện tại.
 - Fake workout/location providers cho simulator và test.
 - `RunSessionViewModel` với trạng thái idle, preparing, active, ending, ended
   và failed.
-- Unit tests cho domain contracts, location quality policy, fake providers và
-  run-session flow.
+- Một Watch persistence v2 duy nhất cho sequence, durable outbox, check-in và
+  crash recovery; migration từ hai file v1 được giữ an toàn.
+- iPhone SQLite gateway v3, restart reconciliation, payload scrubbing,
+  tombstones và một recovery/upload orchestrator.
+- Firebase ingestion, SOS/check-in incident fan-out, dead-man monitor,
+  retention sweep, TTL/index configuration và privacy-safe logging.
+- Unit tests và source verification cho domain, Watch/iPhone core và backend.
 
 ## Chưa xác minh
 
@@ -77,6 +82,10 @@ thuộc Phase 2 hoặc ngoài MVP hiện tại.
 
 Workspace Windows hiện tại chỉ phù hợp để đọc/sửa source và tài liệu. Không thể
 chạy Xcode build hoặc xác nhận hành vi trên thiết bị Apple từ Windows.
+
+Kiểm tra phần source/backend có thể chạy bằng `powershell -File
+Scripts/verify-f-source.ps1`. Full Firebase Emulator verification trên Windows
+cần Node 22 và Java.
 
 ## Bắt đầu nhanh trên macOS
 

@@ -14,6 +14,7 @@ public enum ManualSOSState: Equatable, Sendable {
 public final class ManualSOSController: ObservableObject {
     @Published public private(set) var state: ManualSOSState = .idle
     private let dispatcher: any ManualSOSDispatching
+    public var onQueued: ((ManualSOSReceipt) -> Void)?
 
     public init(dispatcher: any ManualSOSDispatching) {
         self.dispatcher = dispatcher
@@ -23,7 +24,9 @@ public final class ManualSOSController: ObservableObject {
         guard case .idle = state else { return }
         state = .queueing
         do {
-            state = .queued(try await dispatcher.queueManualSOS())
+            let receipt = try await dispatcher.queueManualSOS()
+            state = .queued(receipt)
+            onQueued?(receipt)
         } catch {
             state = .failed(Self.message(for: error))
         }

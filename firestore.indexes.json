@@ -16,6 +16,14 @@
         { "fieldPath": "status", "order": "ASCENDING" },
         { "fieldPath": "last_seen_at", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "incidents",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": [
@@ -25,6 +33,7 @@
     { "collectionGroup": "packets", "fieldPath": "expire_at", "ttl": true, "indexes": [] },
     { "collectionGroup": "incidentFanoutMarkers", "fieldPath": "expire_at", "ttl": true, "indexes": [] },
     { "collectionGroup": "attempts", "fieldPath": "expire_at", "ttl": true, "indexes": [] },
-    { "collectionGroup": "debugPushOutbox", "fieldPath": "expire_at", "ttl": true, "indexes": [] }
+    { "collectionGroup": "debugPushOutbox", "fieldPath": "expire_at", "ttl": true, "indexes": [] },
+    { "collectionGroup": "clientRunSessions", "fieldPath": "expire_at", "ttl": true, "indexes": [] }
   ]
 }

@@ -25,12 +25,12 @@ Before making any implementation change:
 
 | Field | Value |
 | --- | --- |
-| Repository maturity | M0 through Milestone F source exists, including recovery contracts/persistence, phone reconciliation, stale monitoring, retention controls, privacy-safe diagnostics and beta operations documentation. Emulator, Apple builds, staging schedules/TTL, APNs/FCM, and physical-device validation are pending. |
+| Repository maturity | M0 through Milestone F source is wired end to end: Watch uses one atomic v2 persistence/outbox, iPhone restart reconciliation drives the uploader, and backend monitoring/retention/privacy services are connected. Emulator, Apple builds, staging schedules/TTL, APNs/FCM, and physical-device validation are pending. |
 | Current milestone | `F — Recovery, dead-man monitoring and beta hardening (at risk; M0–E verification deferred)` |
 | Current status | `blocked` |
 | Exact next action | Run `bash Scripts/verify-f.sh` on macOS with Node 22, Java, XcodeGen and Xcode, resolve every failure, then complete the staging/TestFlight/device matrix. |
 | Known implementation prerequisite | Build and device validation require macOS with a current Xcode/watchOS SDK plus physical Apple Watch and iPhone. |
-| Known blockers | The current Windows host has no Swift, XcodeGen, or Xcode, so the generated project and Swift tests cannot be verified here. |
+| Known blockers | The current host has Node 24 but no Java, Swift, XcodeGen, or Xcode. Backend Emulator/Node-22 verification and every Apple build/device scenario remain pending. |
 
 ## Locked MVP decisions
 
@@ -217,12 +217,12 @@ Add a new entry after each completed or blocked implementation session. Do not c
 ### 2026-09-08: Milestone F reliability hardening source prepared
 
 - Milestone/status: `F — blocked (implemented at risk; M0–E also blocked)`
-- Completed: Added version-2 atomic Watch run persistence and v1 migration support; HealthKit and view-model recovery APIs; persistent check-in recovery contracts; SQLite v3 integrity checking, expired-lease behavior, payload scrubbing and 30-day tombstones; Firebase-authenticated session reconciliation; edge-triggered stale monitor, 24-hour abandonment and daily privacy sweep; Firestore TTL/index configuration; allowlist logger; redacted support export; debug chaos configuration; failure-mode matrix, beta runbook and F verification scripts.
+- Completed: Replaced the dual Watch stores with one production v2 persistence/outbox and atomic lifecycle/check-in/SOS operations; wired HealthKit/app recovery, transport drain, deterministic P3-only chaos and migration; added one iPhone recovery orchestrator for launch/packet/network/mirroring wakes, typed binding reconciliation, inactive-session terminalization, SQLite fail-closed/scrubbing/tombstones and user-triggered redacted support export; completed repository-injected stale/retention services, mapping cleanup, logger allowlist, expiry/index contracts, source/emulator tests and verification scripts.
 - Changed files: `Packages/SafeRunDomain/`, `Apps/WatchCore/`, `Apps/PhoneCore/`, `Backend/functions/`, `firestore.indexes.json`, `Scripts/verify-f*`, `safe_run_mvp_docs/14_FAILURE_MODES.md`, `safe_run_mvp_docs/15_BETA_RUNBOOK.md`, `README.md`, and this plan.
-- Verification run: Backend TypeScript typecheck/build and Node unit tests; JSON/YAML parse checks; repository diff/static contract scans.
-- Verification result: Backend typecheck and non-emulator unit tests passed on the Windows host. Firebase Emulator tests, Swift compilation/tests, simulator builds, HealthKit recovery, scheduled Functions/TTL deployment, APNs/FCM and physical beta runs remain unverified because Java, Node 22 and the Apple toolchain/devices are unavailable here.
+- Verification run: Ran `Scripts/verify-f-source.ps1`: backend TypeScript typecheck/build, four Node unit tests, JSON/YAML configuration parsing, forbidden direct-log scan and `git diff --check`.
+- Verification result: All available source checks passed on Node 24. The script correctly warned that Node 22 was not verified. Firebase Emulator tests, Swift compilation/tests, simulator builds, HealthKit recovery, scheduled Functions/TTL deployment, APNs/FCM and physical beta runs remain unverified because Java, Node 22 and the Apple toolchain/devices are unavailable here.
 - Decisions recorded: Stale transition at 180 seconds with alert only on loss; 24-hour stale abandonment; telemetry 72-hour, incident 90-day, operational 30-day and debug-outbox 24-hour expiry; P0 cannot be dropped/reordered by chaos injection; SQLite corruption fails closed.
-- Open risks or blockers: The unified Watch persistence is additive and requires Mac compilation/integration validation against legacy queue composition; HealthKit recovered-builder behavior and Watch application lifecycle callback require physical validation; Firestore query indexes and scheduler races require Emulator/staging tests; all prior milestone matrices remain outstanding.
+- Open risks or blockers: Swift APIs and concurrency annotations require first compilation on macOS; HealthKit recovery and Watch lifecycle behavior require physical validation; Firestore transaction races/indexes require Emulator and staging verification; all prior milestone device matrices remain outstanding. No known F component remains intentionally disconnected from production flow.
 - Exact next action: Run `bash Scripts/verify-f.sh` on macOS with Node 22, Java, XcodeGen and Xcode, resolve every failure, then complete the staging/TestFlight/device matrix.
 
 ## Reusable prompt for a new chat

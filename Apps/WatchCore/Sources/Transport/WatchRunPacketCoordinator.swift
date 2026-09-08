@@ -42,36 +42,40 @@ public protocol ManualSOSDispatching: AnyObject {
 public final class WatchRunPacketCoordinator {
     public var onSessionProgress: ((String, Int) -> Void)?
     private let transport: any WatchTransporting
-    private let sessionStore: LocalRunSessionStore
+    private let persistence: WatchRunPersistence
     private let telemetryInterval: TimeInterval
     private let staleHeartRateSeconds: TimeInterval
     private let sample: () -> RunTelemetrySample?
     private let now: () -> Date
     private let makeUUID: () -> UUID
+    private let chaos: DebugChaosController
     private var telemetryTask: Task<Void, Never>?
 
     public init(
         transport: any WatchTransporting,
-        sessionStore: LocalRunSessionStore,
+        persistence: WatchRunPersistence,
         telemetryInterval: TimeInterval = 10,
         staleHeartRateSeconds: TimeInterval = 5,
         now: @escaping () -> Date = Date.init,
         makeUUID: @escaping () -> UUID = UUID.init,
-        sample: @escaping () -> RunTelemetrySample?
+        sample: @escaping () -> RunTelemetrySample?,
+        chaos: DebugChaosController = DebugChaosController()
     ) {
         self.transport = transport
-        self.sessionStore = sessionStore
+        self.persistence = persistence
         self.telemetryInterval = telemetryInterval
         self.staleHeartRateSeconds = staleHeartRateSeconds
         self.now = now
         self.makeUUID = makeUUID
         self.sample = sample
+        self.chaos = chaos
     }
 
-    public func runDidStart() async {
+    public func runDidStart(configuration: RunnerSafetyConfigurationEnvelope? = nil) async {
         do {
-            _ = try await sessionStore.begin()
-            try await enqueueEvent(.sessionStarted)
+            let packet = try await persistence.beginRunAndEnqueueStarted(at: now(), configuration: configuration)
+            onSessionProgress?(packet.sessionID, packet.sequence)
+            await transport.outboxDidChange()
             startTelemetryTimer()
         } catch { /* surfaced by transport diagnostics on the next enqueue */ }
     }
@@ -80,21 +84,24 @@ public final class WatchRunPacketCoordinator {
         telemetryTask?.cancel()
         telemetryTask = nil
         do {
-            try await enqueueEvent(.sessionEnded)
-            try await sessionStore.end()
+            let date = now()
+            let packet = try await persistence.enqueueSessionEndedAndComplete(at: date, context: eventContext(at: date))
+            onSessionProgress?(packet.sessionID, packet.sequence)
+            await transport.outboxDidChange()
         } catch { }
     }
 
     public func sendTelemetry() async throws {
         guard let sample = sample() else { return }
-        let issued = try await sessionStore.issueNext()
-        onSessionProgress?(issued.sessionID, issued.sequence)
+        if chaos.shouldDropTelemetry() { return }
         let date = now()
-        let heartRateAge = sample.heartRateSampleDate.map { date.timeIntervalSince($0) }
+        let heartRateDate = chaos.configuration.staleHeartRate ? sample.heartRateSampleDate?.addingTimeInterval(-60) : sample.heartRateSampleDate
+        let locationReading = chaos.configuration.staleGPS ? sample.location.map { LocationReading(latitude: $0.latitude, longitude: $0.longitude, horizontalAccuracyMeters: $0.horizontalAccuracyMeters, timestamp: $0.timestamp.addingTimeInterval(-60), speedMetersPerSecond: $0.speedMetersPerSecond) } : sample.location
+        let heartRateAge = heartRateDate.map { date.timeIntervalSince($0) }
         let heartRateIsFresh = heartRateAge.map { $0 >= 0 && $0 <= staleHeartRateSeconds } ?? false
-        let locationAge = sample.location.map { date.timeIntervalSince($0.timestamp) }
+        let locationAge = locationReading.map { date.timeIntervalSince($0.timestamp) }
         let locationIsFresh = locationAge.map { $0 >= 0 && $0 <= 20 } ?? false
-        let location = locationIsFresh ? sample.location : nil
+        let location = locationIsFresh ? locationReading : nil
 
         let payload = TelemetryPayload(
             heartRateBPM: heartRateIsFresh ? sample.heartRateBPM : nil,
@@ -113,27 +120,18 @@ public final class WatchRunPacketCoordinator {
             },
             transport: TransportSnapshot(phoneReachable: transport.diagnostics.isReachable)
         )
-        let envelope = TelemetryEnvelope(
-            sessionID: issued.sessionID,
-            sequence: issued.sequence,
-            watchTimestamp: date,
-            payload: payload
-        )
-        let data = try SafeRunJSON.makeEncoder().encode(envelope)
-        try await transport.enqueue(TransportPacket.decodeEnvelope(data))
+        let packet = try await persistence.enqueueTelemetry(payload, at: date)
+        onSessionProgress?(packet.sessionID, packet.sequence)
+        await transport.outboxDidChange()
     }
 
     public func queueManualSOS() async throws -> ManualSOSReceipt {
         let eventID = makeUUID()
         let incidentID = makeUUID()
         let date = now()
-        try await enqueueEvent(
-            .manualSOS,
-            severity: .critical,
-            eventID: eventID,
-            incidentID: incidentID,
-            at: date
-        )
+        let packet = try await persistence.supersedeCheckInAndEnqueueSOS(eventID: eventID, incidentID: incidentID, at: date, context: eventContext(at: date))
+        onSessionProgress?(packet.sessionID, packet.sequence)
+        await transport.outboxDidChange()
         return ManualSOSReceipt(eventID: eventID, incidentID: incidentID, queuedAt: date)
     }
 
@@ -159,24 +157,19 @@ public final class WatchRunPacketCoordinator {
         ruleID: String? = nil,
         evaluation: RuleEvaluationSnapshot? = nil
     ) async throws {
-        let issued = try await sessionStore.issueNext()
-        onSessionProgress?(issued.sessionID, issued.sequence)
         let date = date ?? now()
-        let envelope = EventEnvelope(
-            sessionID: issued.sessionID,
-            sequence: issued.sequence,
-            watchTimestamp: date,
-            payload: EventPayload(
+        let packet = try await persistence.enqueueEvent(
+            EventPayload(
                 eventID: eventID,
                 eventType: type,
                 severity: severity,
                 ruleID: ruleID,
                 incidentID: incidentID,
                 context: eventContext(at: date, evaluation: evaluation)
-            )
+            ), at: date
         )
-        let data = try SafeRunJSON.makeEncoder().encode(envelope)
-        try await transport.enqueue(TransportPacket.decodeEnvelope(data))
+        onSessionProgress?(packet.sessionID, packet.sequence)
+        await transport.outboxDidChange()
     }
 
     private func eventContext(at date: Date, evaluation: RuleEvaluationSnapshot? = nil) -> EventContext? {
@@ -208,12 +201,43 @@ public final class WatchRunPacketCoordinator {
             }
         }
     }
+
+    public func recoverySnapshot() async -> WatchRunRecoverySnapshot? { await persistence.recover() }
+
+    public func recoverRun(startedAt: Date) async -> WatchRunRecoverySnapshot? {
+        let snapshot: WatchRunRecoverySnapshot
+        if await persistence.recover() != nil {
+            guard let aligned = try? await persistence.alignRecoveredStartDate(startedAt) else { return nil }
+            snapshot = aligned
+        }
+        else {
+            guard let created = try? await persistence.beginRecoveredRun(at: startedAt, configuration: nil) else { return nil }
+            snapshot = created
+        }
+        do {
+            if let packet = try await persistence.enqueueRecoveryStateSyncIfNeeded(at: now()) {
+                onSessionProgress?(packet.sessionID, packet.sequence)
+            }
+            await transport.outboxDidChange()
+            startTelemetryTimer()
+        } catch { }
+        return snapshot
+    }
 }
 
 extension WatchRunPacketCoordinator: ManualSOSDispatching {}
 
 extension WatchRunPacketCoordinator: CheckInEventDispatching {
-    public func queueCheckInEvent(_ type: SafetyEventType, severity: IncidentSeverity, incidentID: UUID, evaluation: RuleEvaluationSnapshot?) async throws {
-        try await enqueueEvent(type, severity: severity, incidentID: incidentID, ruleID: "high_hr_sustained_v1", evaluation: evaluation)
+    public func startPersistentCheckIn(_ snapshot: PersistentCheckInSnapshot, evaluation: RuleEvaluationSnapshot, at date: Date) async throws {
+        let enriched = PersistentCheckInSnapshot(incidentID: snapshot.incidentID, startedEventID: snapshot.startedEventID, deadline: snapshot.deadline, context: eventContext(at: date, evaluation: evaluation))
+        let packet = try await persistence.saveCheckInAndEnqueueStarted(enriched, evaluation: evaluation, at: date)
+        onSessionProgress?(packet.sessionID, packet.sequence)
+        await transport.outboxDidChange()
+    }
+
+    public func resolvePersistentCheckIn(_ type: SafetyEventType, severity: IncidentSeverity, eventID: UUID, at date: Date) async throws {
+        let packet = try await persistence.resolveCheckInAndEnqueueEvent(type: type, severity: severity, eventID: eventID, at: date, context: eventContext(at: date))
+        onSessionProgress?(packet.sessionID, packet.sequence)
+        await transport.outboxDidChange()
     }
 }

@@ -1,14 +1,15 @@
 import Foundation
 
 public struct SupportDiagnosticSnapshot: Codable, Equatable, Sendable {
+    public let schemaVersion: Int
     public let generatedAt: Date
     public let appVersion: String
     public let queueDepth: Int
     public let retryCount: Int
     public let errorCodes: [String]
 
-    public init(generatedAt: Date = Date(), appVersion: String, queueDepth: Int, retryCount: Int, errorCodes: [String]) {
-        self.generatedAt = generatedAt; self.appVersion = appVersion; self.queueDepth = queueDepth
+    public init(schemaVersion: Int = 1, generatedAt: Date = Date(), appVersion: String, queueDepth: Int, retryCount: Int, errorCodes: [String]) {
+        self.schemaVersion = schemaVersion; self.generatedAt = generatedAt; self.appVersion = appVersion; self.queueDepth = queueDepth
         self.retryCount = retryCount; self.errorCodes = errorCodes
     }
 }

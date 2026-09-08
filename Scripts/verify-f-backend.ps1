@@ -10,5 +10,5 @@ try {
     npm ci --ignore-scripts
     npm run typecheck
     npm test
-    npx firebase emulators:exec --project demo-safe-run --only auth,firestore,functions "npm run test:emulator"
+    npx firebase emulators:exec --config (Join-Path $repoRoot "firebase.json") --project demo-safe-run --only auth,firestore,functions "npm run test:emulator"
 } finally { Pop-Location }

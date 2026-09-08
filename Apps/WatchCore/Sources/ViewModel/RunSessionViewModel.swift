@@ -26,6 +26,7 @@ public final class RunSessionViewModel: ObservableObject {
     private let locationPolicy: LocationQualityPolicy
     private let now: () -> Date
     private var packetCoordinator: WatchRunPacketCoordinator?
+    private var recoveryAwaitingCheckInResolution = false
 
     public init(
         workoutProvider: any WorkoutDataProviding,
@@ -94,7 +95,7 @@ public final class RunSessionViewModel: ObservableObject {
             if locationAvailable {
                 locationProvider.startUpdatingLocation()
             }
-            await packetCoordinator?.runDidStart()
+            await packetCoordinator?.runDidStart(configuration: pendingConfiguration)
         } catch {
             locationProvider.stopUpdatingLocation()
             fail(with: error)
@@ -123,12 +124,22 @@ public final class RunSessionViewModel: ObservableObject {
         state = .recovering
         do {
             guard let snapshot = try await workoutProvider.recoverWorkout() else {
-                state = .idle
+                guard let local = await packetCoordinator?.recoverySnapshot() else { state = .idle; return }
+                if let savedCheckIn = local.checkIn, savedCheckIn.terminalOutcome == nil {
+                    recoveryAwaitingCheckInResolution = true
+                    await checkInCoordinator?.restore(savedCheckIn, at: now())
+                } else {
+                    await packetCoordinator?.runDidEnd()
+                    state = .ended
+                }
                 return
             }
             startedAt = snapshot.startedAt
             state = snapshot.state
             if locationAvailable { locationProvider.startUpdatingLocation() }
+            if let recovery = await packetCoordinator?.recoverRun(startedAt: snapshot.startedAt ?? now()), let savedCheckIn = recovery.checkIn, savedCheckIn.terminalOutcome == nil {
+                await checkInCoordinator?.restore(savedCheckIn, at: now())
+            }
         } catch { fail(with: error) }
     }
 
@@ -216,6 +227,16 @@ public final class RunSessionViewModel: ObservableObject {
         case .help, .timeout, .superseded: heartRateRule.escalationCompleted()
         }
         ruleState = heartRateRule.state
+        if recoveryAwaitingCheckInResolution && resolution != .superseded {
+            recoveryAwaitingCheckInResolution = false
+            Task { await packetCoordinator?.runDidEnd(); state = .ended }
+        }
+    }
+
+    public func manualSOSQueuedDuringRecovery() {
+        guard recoveryAwaitingCheckInResolution else { return }
+        recoveryAwaitingCheckInResolution = false
+        Task { await packetCoordinator?.runDidEnd(); state = .ended }
     }
 
     private func fail(with error: Error) {

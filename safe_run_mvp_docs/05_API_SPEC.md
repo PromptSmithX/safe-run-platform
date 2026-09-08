@@ -54,6 +54,13 @@ Response `201`:
 
 Idempotency: `client_session_id` must return the same active session if retried.
 
+## 2.1 Restart reconciliation
+
+`POST /v1/run-sessions/reconcile` uses Firebase user auth and accepts at most 50
+`client_session_ids`. It returns only mappings owned by that runner, including
+client/server session IDs, `active|ended|abandoned`, `last_seq`, and related
+incident IDs. It never returns ingest tokens, heart rate, location, or phone data.
+
 ## 3. Telemetry ingestion
 
 `POST /v1/run-sessions/{session_id}/telemetry`
@@ -132,6 +139,11 @@ Effects:
 - revoke ingest token;
 - close non-critical connection-loss incidents;
 - preserve unresolved critical incident.
+
+An active session with no valid packet for 180 seconds moves once from
+`healthy` to `stale`. A valid packet resolves that connection warning without a
+recovery push. A session continuously stale for 24 hours becomes `abandoned`
+and rejects future ingest with `SESSION_INACTIVE`.
 
 ## 6. Device token registration
 

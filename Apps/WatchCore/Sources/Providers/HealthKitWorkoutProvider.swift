@@ -95,6 +95,7 @@ public final class HealthKitWorkoutProvider: NSObject, WorkoutDataProviding {
         }
         guard let recovered else { return nil }
         let builder = recovered.associatedWorkoutBuilder()
+        builder.dataSource = HKLiveWorkoutDataSource(healthStore: healthStore, workoutConfiguration: recovered.workoutConfiguration)
         recovered.delegate = self; builder.delegate = self
         session = recovered; self.builder = builder
         startedAt = recovered.startDate
